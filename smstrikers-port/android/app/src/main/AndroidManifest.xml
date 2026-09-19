@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:installLocation="auto">
+
+    <!-- Dawn has one backend on Android and it is Vulkan, so a device without it cannot run this
+         at all; better for the store or the installer to say so than for the game to. -->
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:version="0x00400003"
+        android:required="true" />
+
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
+    <!-- Rumble, which the game asks PAD for and Aurora forwards to the device's vibrator. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Baixar um driver Vulkan da lista da tela de drivers, e nada mais: o jogo em si não fala
+         com a rede. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Reading the disc image. The app's own directory under Android/data needs no permission at
+         all, and that is the path of least resistance; these are for a player who would rather keep
+         a 1.4 GB image somewhere they can find it, like /sdcard/Strikers. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false"
+        android:theme="@style/Theme.Strikers"
+        android:hardwareAccelerated="true"
+        android:enableOnBackInvokedCallback="false"
+        android:isGame="true"
+        android:appCategory="game">
+
+        <!-- The launcher is not the game: it is the screen that answers "where is the disc?", and
+             it hands over to the SDL activity once there is an answer. Starting SDL first and
+             letting the port's own fatal box explain would work, but it would explain it after a
+             black screen and a process that then exits. -->
+        <!-- DEITADO FIXO AQUI, e sensorLandscape só depois de a tela existir (ver
+             SetupActivity.onCreate). O sistema desenha uma janela de pré-visualização
+             com o windowBackground do tema ANTES de criar a Activity, e a desenha na
+             rotação em que o aparelho está. Com uma orientação fixa ele consegue
+             aplicar a rotação já nessa janela; com sensorLandscape, que não é fixa, a
+             pré-visualização sai em pé e a tela gira depois, que é o lampejo de
+             retrato ao tocar no ícone. -->
+        <activity
+            android:name=".SetupActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".TelaDrivers"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode" />
+
+        <activity
+            android:name=".StrikersActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:alwaysRetainTaskState="true"
+            android:launchMode="singleInstance"
+            android:screenOrientation="sensorLandscape"
+            android:preferMinimalPostProcessing="true"
+            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+            <!-- USB gamepads and GameCube adapters: SDL's HIDDeviceManager wants to hear about
+                 these, and it is the same mechanism the desktop port's adapter support uses. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
