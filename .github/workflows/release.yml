@@ -1,192 +1,84 @@
 name: release
 
-# Build and package all four targets before drafting a release.
+# Publica o APK que está em apk/ como um release, quando uma tag v* é enviada.
+#
+# NÃO COMPILA AQUI, e isso é deliberado. O lado nativo precisa do NDK, do pacote
+# pré-compilado do Dawn e de uns dez minutos de CMake; um runner que falha por
+# uma dependência que se moveu produziria releases vazios de vez em quando. O
+# que está em apk/ é o arquivo que foi compilado e conferido em máquina, e é
+# esse que deve chegar a quem baixa. Se um dia a compilação em CI ficar confiável,
+# ela entra como um segundo job que substitui o arquivo antes deste passo.
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Build and upload artifacts, but do not create a release'
-        type: boolean
-        default: true
+      tag:
+        description: 'A tag a publicar (ex.: v1.2.0). Precisa existir.'
+        required: true
 
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+# O GITHUB_TOKEN vem do próprio Actions e vale só para este repositório e esta
+# execução. Nenhum segredo precisa ser cadastrado.
+permissions:
+  contents: write
 
 jobs:
-  build:
-    name: build (${{ matrix.name }})
-    runs-on: ${{ matrix.runner }}
-    env:
-      STRIKERS_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macos-arm64
-            runner: macos-15
-            archive: tar.gz
-          - name: linux-x86_64
-            runner: ubuntu-24.04
-            archive: tar.gz
-          - name: linux-arm64
-            runner: ubuntu-24.04-arm
-            archive: tar.gz
-          - name: windows-x86_64
-            runner: windows-2022
-            archive: zip
-
+  publish:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install toolchain (Windows)
-        if: runner.os == 'Windows'
-        run: choco install -y ninja llvm
-
-      - name: Install MSYS2 for ffmpeg's configure (Windows)
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MSYS
-          update: false
-          install: make diffutils tar xz curl
-          path-type: inherit
-
-      - name: Build ffmpeg (Windows)
-        if: runner.os == 'Windows'
-        working-directory: smstrikers-port
-        shell: msys2 {0}
-        run: ./tools/build-ffmpeg.sh
-
-      - name: Install toolchain (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ninja ffmpeg
-
-      - name: Install Qt (settings app)
-        if: runner.os != 'Linux'
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.8.*'
-          cache: true
-
-      - name: Install Qt (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qt6-base-dev
-      - name: Point package.sh at the distro Qt (Linux)
-        if: runner.os == 'Linux'
-        run: echo "QT_PREFIX=/usr" >> "$GITHUB_ENV"
-      - name: Set the glibc ceiling (Linux)
-        if: runner.os == 'Linux'
-        run: echo "STRIKERS_MAX_GLIBC=2.35" >> "$GITHUB_ENV"
-
-      - name: Tool tests
-        working-directory: smstrikers-port
-        shell: bash
+      - name: Conferir o APK antes de publicar
+        id: apk
         run: |
-          python3 tools/test_genstubs.py
-          python3 tools/test_extract_disc.py
+          set -euo pipefail
+          apk=$(ls apk/*.apk)
+          echo "caminho=$apk" >> "$GITHUB_OUTPUT"
+          echo "nome=$(basename "$apk")" >> "$GITHUB_OUTPUT"
+          # O sha256 que está no repositório tem de bater com o arquivo. Um release
+          # cujo checksum não confere é pior do que um release que não sai: quem
+          # baixa confere, não bate, e não sabe se o problema é o arquivo ou a lista.
+          ( cd apk && sha256sum -c ./*.sha256 )
+          echo "tamanho=$(du -h "$apk" | cut -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Configure
-        if: runner.os != 'Linux'
-        working-directory: smstrikers-port
-        shell: bash
-        run: ./tools/configure.sh build-aur Release
-
-      - name: Build
-        if: runner.os != 'Linux'
-        working-directory: smstrikers-port
-        shell: bash
-        run: ./tools/rebuild.sh build-aur
-
-      - name: Start the Ubuntu 22.04 container (Linux)
-        if: runner.os == 'Linux'
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          docker run -d --name build -e STRIKERS_VERSION -e DEBIAN_FRONTEND=noninteractive \
-            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE/smstrikers-port" \
-            ubuntu:22.04 sleep infinity
+          set -euo pipefail
+          notas=$(mktemp)
+          cat > "$notas" <<NOTAS
+          Super Mario Strikers rodando nativo em Android arm64.
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: docker exec build ./tools/install-linux-deps.sh
+          **\`${{ steps.apk.outputs.nome }}\`** — ${{ steps.apk.outputs.tamanho }}, arm64-v8a,
+          Android 9 (API 28) ou mais novo, com Vulkan.
 
-      - name: Build ffmpeg (Linux)
-        if: runner.os == 'Linux'
-        run: docker exec build ./tools/build-ffmpeg.sh
+          **Nenhum arquivo do jogo acompanha isto.** O app não inicia o jogo até
+          você fornecer a sua própria cópia do disco: uma imagem \`.iso\`, \`.gcm\`,
+          \`.ciso\` ou \`.gcz\`, ou a pasta \`files\` de um disco extraído. O launcher
+          mostra a pasta exata e oferece copiar o caminho.
 
-      - name: Configure (Linux)
-        if: runner.os == 'Linux'
-        run: docker exec build ./tools/configure.sh build-aur Release
+          Confira o que você baixou:
 
-      - name: Build Dawn (Linux)
-        if: runner.os == 'Linux'
-        run: docker exec build cmake --build build-aur --target webgpu_dawn -j10
+          \`\`\`sh
+          sha256sum -c ${{ steps.apk.outputs.nome }}.sha256
+          \`\`\`
 
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
-        run: docker exec build ./tools/rebuild.sh build-aur
+          O APK é assinado com a **chave de depuração** do SDK do Android — a mesma
+          que toda instalação do SDK tem. Isso basta para o sistema instalar, e não
+          basta para provar quem construiu. O checksum acima e o fato de você poder
+          reconstruir o arquivo a partir do código deste repositório são o que diz
+          de onde ele veio.
+          NOTAS
 
-      - name: Return the tree to the runner user (Linux)
-        if: runner.os == 'Linux'
-        run: docker exec build chown -R "$(id -u):$(id -g)" .
-
-      - name: Package
-        working-directory: smstrikers-port
-        shell: bash
-        run: ./tools/package.sh build-aur "strikers-${{ matrix.name }}" "${{ matrix.archive }}"
-
-      # Unarchived, so a downloaded artifact is the archive itself rather than a zip holding it.
-      - uses: actions/upload-artifact@v7
-        with:
-          path: smstrikers-port/dist/strikers-${{ matrix.name }}.${{ matrix.archive }}
-          archive: false
-          if-no-files-found: error
-
-  release:
-    name: draft release
-    needs: build
-    if: >-
-      success() && startsWith(github.ref, 'refs/tags/v') &&
-      (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      # skip-decompress, or the Windows zip is served as application/zip and unpacked loose.
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: strikers-*
-          path: artifacts
-          merge-multiple: true
-          skip-decompress: true
-
-      - name: Verify archives and write checksums
-        working-directory: artifacts
-        run: |
-          set -eu
-          for archive in strikers-macos-arm64.tar.gz strikers-linux-x86_64.tar.gz strikers-linux-arm64.tar.gz strikers-windows-x86_64.zip; do
-            test -s "$archive"
-          done
-          sha256sum *.tar.gz *.zip > SHA256SUMS
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-          fail_on_unmatched_files: true
-          draft: true
-          generate_release_notes: true
-          body: |
-            Built from ${{ github.sha }}.
-
-            Disc data is not bundled. Unpack an archive, put the extracted
-            disc's `files/` directory beside the executable, and run it.
-            The player instructions are included in the archive.
-
-            These are experimental builds for macOS arm64, Linux x86-64,
-            Linux arm64 and Windows x86-64.
-            Linux builds need glibc 2.35 or newer: Ubuntu 22.04, Debian 12,
-            Fedora 36, current SteamOS, or anything later.
-            Verify downloads against SHA256SUMS. Test the packaged builds
-            before publishing this draft.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "${{ steps.apk.outputs.caminho }}" apk/*.sha256 --clobber
+          else
+            gh release create "$TAG" \
+              "${{ steps.apk.outputs.caminho }}" apk/*.sha256 \
+              --title "Strikers para Android $TAG" \
+              --notes-file "$notas"
+          fi
