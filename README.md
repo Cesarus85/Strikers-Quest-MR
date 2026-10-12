@@ -136,9 +136,12 @@ So there are four views, and you can mix them any way you like:
 - **Grab it:** hold the **left grip** and move your hand. The table follows, up and down too. Let
   go to drop it there.
 - **Make it bigger or smaller, or turn it:** keep holding the left grip and push the **left
-  stick** up/down to resize it and left/right to turn it.
+  stick** up/down to resize it and left/right to turn it. (While you hold the left grip, your
+  player stands still: the stick is moving the table.)
 - **With both hands:** hold the left grip, put your right hand on the table and squeeze the
   **right grip** too. Pull your hands apart or together to resize it, and twist them to turn it.
+- **Right hand only:** squeeze the right grip with your hand on the table to grab it. Anywhere
+  else, the right grip swaps items as usual.
 - Lost the table? **Click the left stick once** and it comes back in front of you.
 
 A Bluetooth gamepad paired to the headset also works for offline play.
