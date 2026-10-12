@@ -1,6 +1,7 @@
 #include "fifo.hpp"
 
 #include "../thread.hpp"
+#include "../xr_waits.hpp"
 #include "command_processor.hpp"
 
 #include <algorithm>
@@ -88,6 +89,7 @@ void worker_main(std::stop_token token) noexcept {
     const uint64_t processed = sProcessed.load(std::memory_order_relaxed);
     const uint64_t published = sPublished.load(std::memory_order_acquire);
     if (published != processed) {
+      const xr_waits::Scope busy{xr_waits::FifoBusy};
       process_to(published, std::memory_order_release);
       continue;
     }
@@ -286,6 +288,7 @@ void drain() {
 
     uint64_t processed = sProcessed.load(std::memory_order_acquire);
     if (processed < target) {
+      const xr_waits::Scope waited{xr_waits::FifoDrain};
       do {
         sProcessed.wait(processed, std::memory_order_acquire);
         processed = sProcessed.load(std::memory_order_acquire);

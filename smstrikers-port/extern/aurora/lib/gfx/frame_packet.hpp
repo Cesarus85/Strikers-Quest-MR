@@ -104,10 +104,14 @@ struct RenderPass {
   bool discardable = false;
   bool captureDepthSnapshot = false;
   bool sealed = false;
+  // strikers-quest (from aurora-vr): the color target belongs to the caller
+  // (gfx::create_pass_external), so the pass's output is consumed by whoever owns that texture and
+  // is never discardable for lack of a snapshot/resolve consumer.
+  bool externalTarget = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 
   RenderTargetLayout target_layout() const noexcept;
-  bool has_consumer() const { return resolveTarget || snapshotColorDst || snapshotDepthDst; }
+  bool has_consumer() const { return externalTarget || resolveTarget || snapshotColorDst || snapshotDepthDst; }
   bool has_content() const {
     if (hasDraws || clearDepth) {
       return true;

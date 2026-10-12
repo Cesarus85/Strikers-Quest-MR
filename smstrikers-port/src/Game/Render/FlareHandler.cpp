@@ -7,6 +7,9 @@
 #include "NL/gl/glView.h"
 
 #include "Game/GL/gluMeshWriter.h"
+#include "NL/gl/glMatrix.h"
+#include "NL/gl/glState.h"
+#include "port/xr_layers.h" // strikers-quest: floodlight glows stay off the Tabletop field
 
 FlareHandler FlareHandler::instance;
 
@@ -182,6 +185,25 @@ void FlareHandler::Render()
         glSetCurrentRasterState(glHandleizeRasterState());
         glSetCurrentTexture(glGetTexture("global/white"), GLTT_Diffuse);
 
+        // strikers-quest: the floodlight glows are stadium, not Tabletop field. They are world-space
+        // quads with no model of their own, so in the headset 3D modes they get a matrix handle of
+        // their own (identity, as before) that the table layer skips (port/xr_layers.h).
+        uintptr_t xrPrevMatrix = 0;
+        bool xrTagged = false;
+        if (PortXrLayersActive())
+        {
+            const uintptr_t h = glAllocMatrix();
+            if (h != 0xFFFFFFFF)
+            {
+                nlMatrix4 identity;
+                identity.SetIdentity();
+                glSetMatrix(h, identity);
+                xrPrevMatrix = glSetCurrentMatrix(h);
+                PortXrMarkStadiumHandle(h);
+                xrTagged = true;
+            }
+        }
+
         if (halos.m_headNode != NULL)
         {
             GLMeshWriter writer;
@@ -222,5 +244,8 @@ void FlareHandler::Render()
                 }
             }
         }
+
+        if (xrTagged)
+            glSetCurrentMatrix(xrPrevMatrix);
     }
 }

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "port/input.h"
+#include "port/xr_layers.h" // strikers-quest: camera-side stands in the headset's stadium layer
 #include "NL/nlString.h"
 #include "NL/vmath.h"
 #include "Game/World.h"
@@ -1162,8 +1163,16 @@ void World::ExtractFrustumPlanes()
 /**
  * Offset/Address/Size: 0x1340 | 0x80196004 | size: 0xE8
  */
+// strikers-quest: in the headset's 3D modes (Tabletop, Stadium) the world is seen from wherever
+// the player's head is, not from the game camera, so nothing may be culled against the game
+// camera's frustum. See src/platform/xr_quest.cpp.
+extern "C" int PortXrStereoWorld(void);
+extern "C" int PortXrStereoFullStands(void);
+
 bool World::IsSphereInFrustum(const nlMatrix4& mat, float radius)
 {
+    if (PortXrStereoWorld())
+        return true;
     nlVector3 v3Position = mat.GetTranslation();
 
     f32 posX = v3Position.x;
@@ -1185,6 +1194,8 @@ bool World::IsSphereInFrustum(const nlMatrix4& mat, float radius)
 
 unsigned char World::IsSphereInFrustum(const nlVector4* pPlanes, const nlMatrix4& mWorld, float fRadius)
 {
+    if (PortXrStereoWorld())
+        return 1;
     nlVector3 v3Position = mWorld.GetTranslation();
     f32 negRadius = -fRadius;
     for (int i = 0; i < 6; i++)
@@ -1198,7 +1209,25 @@ unsigned char World::IsSphereInFrustum(const nlVector4* pPlanes, const nlMatrix4
 /**
  * Offset/Address/Size: 0x10F4 | 0x80195DB8 | size: 0x24C
  */
+static void DoTranslucencyGame(DrawableObject* pObject);
+
+// strikers-quest: the headset's stadium layer is seen from where you stand, all the way around, so
+// the camera-side stands the gameplay camera hides (0x2000, 0x8000) or fades (0x1000) stay solid
+// there. They are left out of the broadcast (normal) view only, where the game would have hidden
+// them (port/xr_layers.h PortXrNoteCameraSide).
+extern "C" int PortXrStadiumLayerActive(void);
+
 void DoTranslucency(DrawableObject* pObject)
+{
+    DoTranslucencyGame(pObject);
+    if ((pObject->m_uObjectCreationFlags & (0x1000 | 0x2000 | 0x8000)) && PortXrStadiumLayerActive())
+    {
+        PortXrNoteCameraSide(pObject, pObject->m_translucency < 0.99f);
+        pObject->m_translucency = 1.0f;
+    }
+}
+
+static void DoTranslucencyGame(DrawableObject* pObject)
 {
     int cameraType = cCameraManager::m_pBeginFrameCameraType;
 
@@ -1226,6 +1255,7 @@ void DoTranslucency(DrawableObject* pObject)
         inGameplayCamera = true;
     }
 
+    // (strikers-quest: the headset's stadium layer undoes the hiding per send, DoTranslucency.)
     if (sbPretendWereNotInGameplayCam)
     {
         inGameplayCamera = false;
@@ -1359,6 +1389,8 @@ void DoTranslucency(DrawableObject* pObject);
 
 static inline u8 World_IsSphereInFrustumInline(World* pWorld, const nlMatrix4& mat, f32 radius)
 {
+    if (PortXrStereoWorld())
+        return 1;
     nlVector3 v3Position = mat.GetTranslation();
 
     f32 posX = v3Position.x;

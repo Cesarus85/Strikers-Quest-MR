@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "dolphin/types.h"
+#include "dolphin/os.h"
 #include "port/host.h"
 #include "port/benchmark.h"
 #include "port/determinism.h"
@@ -190,10 +191,30 @@ static double fixed_dt_ms(void)
     return s_ms;
 }
 
-int PortFixedTimestep(void) { return fixed_dt_ms() > 0.0; }
+// strikers-quest (include/port/xr_net.h): an online match steps the game by exactly one NTSC frame
+// per game frame on both headsets. Switched on and off at runtime; the virtual clock continues from
+// the real one at the switch, so the game sees no jump.
+static int s_netFixed;
+static u32 s_netBase;
+static u32 s_netRetrace0;
+
+void PortNetSetFixedStep(int on)
+{
+    if (on && !s_netFixed)
+    {
+        s_netBase = (u32)OSGetTick();
+        s_netRetrace0 = s_retrace_count;
+    }
+    s_netFixed = on;
+}
+
+int PortFixedTimestep(void) { return s_netFixed || fixed_dt_ms() > 0.0; }
 
 unsigned int PortVirtualTicker(void)
 {
+    if (s_netFixed)
+        return s_netBase + (u32)((u64)(s_retrace_count - s_netRetrace0) * 675000ull);  // 40.5 MHz / 60
+
     // OSGetTick counts bus clocks at 40.5MHz; nlGetTickerDifference converts back through
     // __OSBusClock, so the units have to match OSGetTick's or every delta in the game comes out
     // scaled.

@@ -188,6 +188,35 @@ final class StrikersHome {
         setenv("STRIKERS_PROBE_WIDEN", "1");
 
         prepararDriver(context);
+        loadEnvFile(home);
+    }
+
+    /**
+     * strikers-quest: a developer hook. Each KEY=VALUE line of env.txt in the home folder becomes an
+     * environment variable before the game starts (# lines and blanks skipped), so a headset run can
+     * be configured over adb -- STRIKERS_CONTROL for the control channel, STRIKERS_XR_* and the
+     * like -- without a rebuild. No file, nothing happens.
+     */
+    private static void loadEnvFile(File home) {
+        File env = new File(home, "env.txt");
+        if (!env.isFile()) {
+            return;
+        }
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(env))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    continue;
+                }
+                int eq = line.indexOf('=');
+                if (eq > 0) {
+                    setenv(line.substring(0, eq).trim(), line.substring(eq + 1).trim());
+                }
+            }
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "env.txt unreadable", e);
+        }
     }
 
     /**
@@ -407,7 +436,8 @@ final class StrikersHome {
             }
             String name = entry.getName().toLowerCase(Locale.ROOT);
             if (!name.endsWith(".iso") && !name.endsWith(".gcm")
-                    && !name.endsWith(".ciso") && !name.endsWith(".gcz")) {
+                    && !name.endsWith(".ciso") && !name.endsWith(".gcz")
+                    && !name.endsWith(".rvz")) {  // strikers-quest: Dolphin's .rvz too
                 continue;
             }
             // Lowest name wins, the same rule src/platform/dvd.c uses, so the two agree on which of

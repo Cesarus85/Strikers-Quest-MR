@@ -28,6 +28,22 @@ constexpr int kChannels = 2;
 // How far ahead to keep the device fed: 30 ms covers a dropped frame at 60 Hz.
 constexpr int kTargetBuffers = 6;
 
+// strikers-quest: STRIKERS_AUDIO_BUFFERS overrides kTargetBuffers. The Quest build sets 10 (50 ms):
+// under the 72 Hz headset loop a 60 Hz game frame can arrive 28 ms after the last one, plus the
+// frame's own work, which ran a 30 ms queue dry. Read once, on the first update.
+int target_buffers()
+{
+    static int s_target = 0;
+    if (s_target == 0) {
+        const char* e = std::getenv("STRIKERS_AUDIO_BUFFERS");
+        const int v = (e != nullptr && *e != '\0') ? std::atoi(e) : 0;
+        s_target = (v >= 2 && v <= 40) ? v : kTargetBuffers;
+        if (s_target != kTargetBuffers)
+            std::fprintf(stderr, "[port] audio: keeping %d buffers queued (%d ms)\n", s_target, s_target * 5);
+    }
+    return s_target;
+}
+
 // Ceiling on catch-up, so a long stall does not run the sequencer forward at speed; past this the
 // gap is lost.
 constexpr int kMaxBuffersPerUpdate = 24;
@@ -180,7 +196,7 @@ void PortAudioUpdate(void) {
     if (queued == 0 && s_buffers != 0)
         ++s_underruns;
 
-    const int target = static_cast<int>(bufBytes) * kTargetBuffers;
+    const int target = static_cast<int>(bufBytes) * target_buffers();
     int want = (target - queued + static_cast<int>(bufBytes) - 1) / static_cast<int>(bufBytes);
     if (want <= 0)
         return;

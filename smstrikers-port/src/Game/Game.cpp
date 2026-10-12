@@ -31,6 +31,10 @@ extern cTeam* g_pTeams[];
 extern cBall* g_pBall;
 #include <stdlib.h>
 #include "port/overlay.h"
+#include "port/xr_quest.h" // strikers-quest: goal celebrations
+#include "Game/Render/Wiper.h" // strikers-quest: the self-test's flash wipe
+#include "port/xr_net.h"       // strikers-quest: online 1v1
+#include "NL/nlTask.h"
 #include <string.h>
 #include "Game/AnimInventory.h"
 #include "Game/AI/ShotMeter.h"
@@ -513,6 +517,294 @@ void cGame::BeginGame(bool bRematch, bool bStraightToKickoff)
     ReplayManager::Instance()->ResetSnapshots();
 }
 
+// strikers-quest: goal celebrations in the headset (src/platform/xr_quest.cpp). The goal comes from
+// CheckForGoal below; the replay, skip and kick-off edges are polled once a game frame
+// (PortCelebrationPoll, from main.cpp). Nothing here changes the game.
+static int port_celebration_character(const cPlayer* p)
+{
+    if (p == NULL)
+        return -1;
+    const int c = (int)p->m_eCharacterClass;
+    // A captain playing in goal counts as that captain.
+    static const int kGoalieToFielder[] = { DAISY, DONKEYKONG, LUIGI, MARIO, PEACH, WALUIGI, WARIO, YOSHI };
+    if (c >= DAISY_GOALIE && c <= YOSHI_GOALIE)
+        return kGoalieToFielder[c - DAISY_GOALIE];
+    if (c < 0 || c >= NUM_FIELDER_CLASSES || c == MYSTERY)
+        return -1; // Kritter keepers and the like: the team's captain stands in
+    return c;
+}
+
+static void port_celebration_goal(int side, int goalType, int numGoals, int hyper, const cPlayer* scorer,
+                                  const cPlayer* teamTouch, int humanPad)
+{
+    const bool ownGoal = goalType == 5;
+    // On an own goal the scorer is on the conceding team; the game credits the scoring team's last
+    // toucher instead (Presentation.cpp, NisPlayer.cpp).
+    int character = port_celebration_character(ownGoal ? teamTouch : scorer);
+    if (character < 0 && g_pTeams[side] != NULL)
+        character = port_celebration_character(g_pTeams[side]->GetCaptain());
+    PortXrGoal(side, character, numGoals == 2 ? 1 : 0, hyper, ownGoal ? 1 : 0, humanPad);
+}
+
+extern "C" void PortCelebrationPoll(void)
+{
+    static u32 s_prevTaskState = 0;
+    static bool s_prevByPassing = false;
+    static int s_prevGameState = -1;
+    static bool s_replayRunning = false;
+
+    if (nlTaskManager::m_pInstance == NULL)
+        return;
+    const u32 taskState = nlTaskManager::m_pInstance->m_CurrState;
+    Presentation& pres = Presentation::Instance();
+    // Self-test (xr_fx "wipe"): the replay wipe with the white flash, during live play.
+    if (PortXrTakeTestWipe() && taskState == 2)
+        Wiper::Instance().DoWipe("fade_to_white_and_back");
+    // GoalCaptainCelebration, GoalSidekickCelebration, GoalJumbotron, GoalSuddenDeath; not the
+    // end-of-match highlights (PlayHighlight), which also run as an auto replay.
+    const bool goalScript = strncmp(pres.mCurrentFunction, "Goal", 4) == 0;
+    const bool inGoalShow = taskState == 0x100 || taskState == 0x10; // celebration cutscene, replay
+
+    if (pres.mByPassing && !s_prevByPassing && goalScript && inGoalShow)
+    {
+        PortXrCelebrationPhase(3); // skipped: effects stop at once
+        s_replayRunning = false;
+    }
+    else if (taskState == 0x10 && s_prevTaskState != 0x10 && goalScript)
+    {
+        PortXrCelebrationPhase(1); // replay starts: the jumbotron drops
+        s_replayRunning = true;
+    }
+    else if (taskState != 0x10 && s_prevTaskState == 0x10 && s_replayRunning)
+    {
+        PortXrCelebrationPhase(2); // replay played out: effects taper off
+        s_replayRunning = false;
+    }
+    if (g_pGame != NULL)
+    {
+        const int gameState = (int)g_pGame->m_eGameState;
+        if (gameState == GS_GAMEPLAY && s_prevGameState == GS_KICKOFF)
+            PortXrCelebrationPhase(4); // play is live again
+        s_prevGameState = gameState;
+    }
+    PortXrSetGameplayLive(taskState == 2 && g_pGame != NULL ? 1 : 0);
+
+    // The player you control (pad 0), for the Tabletop "that's you" marker. Only while the match is
+    // being played; cutscenes and replays hide it.
+    int markerShown = 0;
+    float markerPos[3] = { 0.0f, 0.0f, 0.0f };
+    int markerTeamCaptain = -1;
+    if (taskState == 2 && g_pGame != NULL)
+    {
+        for (int side = 0; side < 2 && !markerShown; side++)
+        {
+            cTeam* team = g_pTeams[side];
+            if (team == NULL)
+                continue;
+            for (int i = 0; i < 5 && !markerShown; i++)
+            {
+                cPlayer* player = team->m_pPlayers[i];
+                if (player == NULL)
+                    continue;
+                cGlobalPad* pad = player->GetGlobalPad();
+                if (pad == NULL || pad->m_padIndex != PortNetLocalPad())
+                    continue;
+                markerShown = 1;
+                // Self-test (xr_fx "item"): a green shell for this team, to try X with.
+                if (PortXrTakeTestItem())
+                {
+                    team->SetCurrentPowerUp(POWER_UP_GREEN_SHELL, 1);
+                    PortXrNoteItemUse(-2, team->GetPowerUpByIndex(0).eType, 0);
+                }
+                markerPos[0] = player->m_v3Position.x;
+                markerPos[1] = player->m_v3Position.y;
+                markerPos[2] = player->m_v3Position.z;
+                cFielder* captain = team->GetCaptain();
+                markerTeamCaptain = captain != NULL ? port_celebration_character(captain) : -1;
+            }
+        }
+    }
+    PortXrSetPlayerMarker(markerShown, markerPos[0], markerPos[1], markerPos[2], markerTeamCaptain);
+
+    // Items that will not fire (Lance, r26: X did nothing all match). X is refused while the fielder
+    // is still in an item-throw animation, or while the Super Strike flag is on. If either is left
+    // on long after any throw or Super Strike could still be running, X stays dead for the rest of
+    // the match: clear it after 3 s and log it.
+    static float s_throwSeconds[2][4];
+    static float s_stsSeconds = 0.0f;
+    if (taskState == 2 && g_pGame != NULL)
+    {
+        const float kFrame = 1.0f / 60.0f;
+        bool stsRunning = false;
+        for (int side = 0; side < 2; side++)
+        {
+            cTeam* team = g_pTeams[side];
+            for (int i = 0; i < 4; i++)
+            {
+                cPlayer* player = team != NULL ? team->m_pPlayers[i] : NULL;
+                if (player == NULL || player->m_eClassType != FIELDER)
+                {
+                    s_throwSeconds[side][i] = 0.0f;
+                    continue;
+                }
+                cFielder* fielder = (cFielder*)player;
+                if (fielder->m_eActionState == ACTION_SHOOT_TO_SCORE)
+                    stsRunning = true;
+                if (fielder->IsPlayingPowerupAnim())
+                {
+                    s_throwSeconds[side][i] += kFrame;
+                    if (s_throwSeconds[side][i] > 3.0f)
+                    {
+                        char msg[96];
+                        snprintf(msg, sizeof(msg), "item: unstuck throw anim %d (team %d player %d)",
+                                 fielder->m_nPowerupAnimID, side, i);
+                        PortXrLog(msg);
+                        fielder->ClearPowerupAnimState(false);
+                        s_throwSeconds[side][i] = 0.0f;
+                    }
+                }
+                else
+                {
+                    s_throwSeconds[side][i] = 0.0f;
+                }
+            }
+        }
+        if (g_pGame->mbCaptainShotToScoreOn && !stsRunning)
+        {
+            s_stsSeconds += kFrame;
+            if (s_stsSeconds > 3.0f)
+            {
+                PortXrLog("item: Super Strike flag was left on, cleared");
+                g_pGame->mbCaptainShotToScoreOn = false;
+                s_stsSeconds = 0.0f;
+            }
+        }
+        else
+        {
+            s_stsSeconds = 0.0f;
+        }
+    }
+    s_prevByPassing = pres.mByPassing;
+    s_prevTaskState = taskState;
+
+    // Online: the match state both headsets should share, for the desync check.
+    if (PortNetOnline())
+    {
+        unsigned int h = 2166136261u;
+        struct Fnv
+        {
+            static void Mix(unsigned int& h, const void* p, size_t n)
+            {
+                const unsigned char* b = (const unsigned char*)p;
+                for (size_t i = 0; i < n; i++)
+                {
+                    h ^= b[i];
+                    h *= 16777619u;
+                }
+            }
+        };
+        if (g_pGame != NULL && g_pBall != NULL)
+        {
+            Fnv::Mix(h, &g_pBall->m_v3Position, sizeof(g_pBall->m_v3Position));
+            for (int side = 0; side < 2; side++)
+            {
+                cTeam* team = g_pTeams[side];
+                if (team == NULL)
+                    continue;
+                Fnv::Mix(h, &team->m_nScore, sizeof(team->m_nScore));
+                for (int i = 0; i < 5; i++)
+                {
+                    if (team->m_pPlayers[i] != NULL)
+                        Fnv::Mix(h, &team->m_pPlayers[i]->m_v3Position, sizeof(nlVector3));
+                }
+            }
+        }
+        PortNetFrameEnd(h, taskState == 4 ? 1 : 0);
+    }
+}
+
+// strikers-quest: online 1v1 (include/port/xr_net.h), the game's half.
+// The settings that change how a match plays, as one blob the host sends the guest.
+static int port_net_pack_options(unsigned char* out)
+{
+    GameInfoManager* pInfo = nlSingleton<GameInfoManager>::Instance();
+    int n = 0;
+    memcpy(out + n, &pInfo->mCurGameGameplayOptions, sizeof(GameplaySettings));
+    n += sizeof(GameplaySettings);
+    memcpy(out + n, &pInfo->mUserInfo.mGameplayOptions, sizeof(GameplaySettings));
+    n += sizeof(GameplaySettings);
+    memcpy(out + n, &pInfo->mUserInfo.mPowerupOptions, sizeof(PowerupSettings));
+    n += sizeof(PowerupSettings);
+    memcpy(out + n, &pInfo->mUserInfo.mCheatOptions, sizeof(CheatSettings));
+    n += sizeof(CheatSettings);
+    memcpy(out + n, pInfo->mCurrentDifficulty, sizeof(pInfo->mCurrentDifficulty));
+    n += sizeof(pInfo->mCurrentDifficulty);
+    out[n++] = pInfo->mUseCurGameSettings ? 1 : 0;
+    return n;
+}
+
+static void port_net_unpack_options(const unsigned char* in, int size)
+{
+    GameInfoManager* pInfo = nlSingleton<GameInfoManager>::Instance();
+    unsigned char mine[64];
+    if (size != port_net_pack_options(mine))
+        return;  // another layout: keep this headset's own
+    int n = 0;
+    memcpy(&pInfo->mCurGameGameplayOptions, in + n, sizeof(GameplaySettings));
+    n += sizeof(GameplaySettings);
+    memcpy(&pInfo->mUserInfo.mGameplayOptions, in + n, sizeof(GameplaySettings));
+    n += sizeof(GameplaySettings);
+    memcpy(&pInfo->mUserInfo.mPowerupOptions, in + n, sizeof(PowerupSettings));
+    n += sizeof(PowerupSettings);
+    memcpy(&pInfo->mUserInfo.mCheatOptions, in + n, sizeof(CheatSettings));
+    n += sizeof(CheatSettings);
+    memcpy(pInfo->mCurrentDifficulty, in + n, sizeof(pInfo->mCurrentDifficulty));
+    n += sizeof(pInfo->mCurrentDifficulty);
+    pInfo->mUseCurGameSettings = in[n] != 0;
+}
+
+extern "C" int PortNetGameHoldMatchStart(void)
+{
+    GameInfoManager* pInfo = nlSingleton<GameInfoManager>::Instance();
+    if (pInfo == NULL || !pInfo->IsInFriendlyMode())
+        return 0;
+    PortNetMatch m;
+    memset(&m, 0, sizeof m);
+    m.teams[0] = (int)pInfo->GetTeam(0);
+    m.teams[1] = (int)pInfo->GetTeam(1);
+    m.sidekicks[0] = (int)pInfo->GetSidekick(0);
+    m.sidekicks[1] = (int)pInfo->GetSidekick(1);
+    m.stadium = (int)pInfo->GetStadium();
+    m.optionsSize = port_net_pack_options(m.options);
+    const short side = pInfo->GetPlayingSide(0);
+    return PortNetHoldMatchStart(&m, side == 1 ? 1 : 0);
+}
+
+extern "C" void PortNetGameFrameBegin(void)
+{
+    unsigned int seed = 0;
+    int isStart = 0;
+    PortNetMatch m;
+    if (!PortNetFrameBegin(&seed, &m, &isStart))
+        return;
+    // Every online frame starts from the same random state on both headsets.
+    nlSetRandomSeed(seed, &nlDefaultSeed);
+    if (!isStart)
+        return;
+    // The agreed match: home = the host's pick on pad 0, away = the guest's on pad 1.
+    GameInfoManager* pInfo = nlSingleton<GameInfoManager>::Instance();
+    pInfo->SetMode(GameInfoManager::GM_FRIENDLY);
+    pInfo->SetTeam(0, (eTeamID)m.teams[0]);
+    pInfo->SetTeam(1, (eTeamID)m.teams[1]);
+    pInfo->SetSidekick(0, (eSidekickID)m.sidekicks[0]);
+    pInfo->SetSidekick(1, (eSidekickID)m.sidekicks[1]);
+    pInfo->SetStadium((eStadiumID)m.stadium);
+    for (int pad = 0; pad < 4; pad++)
+        pInfo->SetPlayingSide((unsigned short)pad, (short)(pad < 2 ? pad : -1));
+    pInfo->mMainUserPadNumber = (eFEINPUT_PAD)0;
+    port_net_unpack_options(m.options, m.optionsSize);
+}
+
 /**
  * Offset/Address/Size: 0xE5C | 0x8003D3D0 | size: 0x2E0
  */
@@ -618,6 +910,9 @@ void cGame::CheckForGoal()
 
             pGoalScored->data.pLastTouch[0] = m_pTeamTouch[0];
             pGoalScored->data.pLastTouch[1] = m_pTeamTouch[1];
+
+            port_celebration_goal(nSide, (int)g_pBall->m_uGoalType, (int)uNumGoalsScored, (int)g_pBall->m_unk_0xA5,
+                                  m_pScorer, m_pTeamTouch[nSide], pGoalScored->sideOfInterest); // strikers-quest
 
             g_pBall->m_uGoalType = 4;
             m_bBallInNet = true;
@@ -1111,14 +1406,24 @@ extern "C" void PortDebugFrame(void)
                 if (!onMenu || nlTaskManager::m_pInstance == NULL
                     || nlTaskManager::m_pInstance->m_CurrState != 4)
                     break;
-                pInfo->SetMode(GameInfoManager::GM_FRIENDLY);
-                pInfo->SetTeam(0, (eTeamID)c.a);
-                pInfo->SetTeam(1, (eTeamID)c.b);
-                pInfo->SetSidekick(0, (eSidekickID)(int)c.f[0]);
-                pInfo->SetSidekick(1, (eSidekickID)(int)c.f[1]);
-                pInfo->SetStadium((eStadiumID)c.c);
-                for (int pad = 0; pad < 4; pad++)
-                    pInfo->SetPlayingSide((unsigned short)pad, (short)(pad == 0 ? (int)c.f[2] : -1));
+                // strikers-quest: online, the agreed match was set up this frame (PortNetGameFrameBegin).
+                if (!PortNetOnline())
+                {
+                    pInfo->SetMode(GameInfoManager::GM_FRIENDLY);
+                    pInfo->SetTeam(0, (eTeamID)c.a);
+                    pInfo->SetTeam(1, (eTeamID)c.b);
+                    pInfo->SetSidekick(0, (eSidekickID)(int)c.f[0]);
+                    pInfo->SetSidekick(1, (eSidekickID)(int)c.f[1]);
+                    pInfo->SetStadium((eStadiumID)c.c);
+                    for (int pad = 0; pad < 4; pad++)
+                        pInfo->SetPlayingSide((unsigned short)pad, (short)(pad == 0 ? (int)c.f[2] : -1));
+                    // With the friend in the room, wait for them like the menus' Friendly does.
+                    if (PortNetGameHoldMatchStart())
+                    {
+                        PortDebugPushCommand(&c);
+                        return;
+                    }
+                }
                 nlTaskManager::SetNextState(2);
             }
             break;

@@ -1,5 +1,6 @@
 #include "port/region.h"  // PORT: one binary, three discs
 #include "Game/AI/Fielder.h"
+#include "port/xr_quest.h" // strikers-quest: item-use log
 #include "Game/MathHelpers.h"
 #include "Game/AI/FielderActions.h"
 #include "Game/AI/AIPlay.h"
@@ -5938,6 +5939,12 @@ void cFielder::SetPowerup(ePowerUpType eNewPowerup, int nnumOfPowerups, cFielder
  */
 void cFielder::UseTeamPowerup(cFielder* pTarget)
 {
+    // PORT (strikers-quest): logged for the Touch controller item check.
+    if (GetGlobalPad() != NULL)
+    {
+        PortXrNoteItemUse(GetTeam()->GetPowerUpByIndex(0).eType, GetTeam()->GetPowerUpByIndex(1).eType,
+                          (m_ePowerup == POWER_UP_STAR) || (m_tFrozenTimer.m_uPackedTime != 0));
+    }
     if ((m_ePowerup == POWER_UP_STAR) || (m_tFrozenTimer.m_uPackedTime != 0))
     {
         return;

@@ -14,6 +14,7 @@
 #endif
 #include "../webgpu/gpu.hpp"
 #include "../webgpu/gpu_prof.hpp"
+#include "../xr_waits.hpp"
 
 #include <array>
 #include <atomic>
@@ -586,6 +587,7 @@ bool wait_for_staging_buffer(size_t slot) {
 
 size_t acquire_frame_slot() {
   ZoneScopedN("Acquire frame slot");
+  const xr_waits::Scope waited{xr_waits::FrameSlot};
   const auto waitStart = PresentClock::now();
   // smstrikers-port: blocks, since the render worker releases slots itself and never from a Dawn callback.
   const size_t slot = g_frameSlots.acquire();
@@ -597,6 +599,7 @@ size_t acquire_frame_slot() {
 
 std::optional<size_t> acquire_mapped_staging_buffer() {
   ZoneScopedN("Acquire mapped staging buffer");
+  const xr_waits::Scope waited{xr_waits::Staging};
   while (true) {
     if (auto slot = g_stagingSlots.acquire_for(std::chrono::milliseconds{1})) {
       if (wait_for_staging_buffer(*slot)) {
@@ -746,3 +749,9 @@ void aurora_get_pipeline_counts(uint32_t* queued, uint32_t* created) {
   }
 }
 float aurora_get_fps() { return aurora::gfx::calculate_fps(); }
+// strikers-quest: xr_waits.hpp's sums since the last call, in order of xr_waits::Kind.
+extern "C" void aurora_xr_take_waits(uint64_t* outNs, int count) {
+  for (int i = 0; i < count && i < aurora::xr_waits::Count; ++i) {
+    outNs[i] = aurora::xr_waits::g_ns[i].exchange(0, std::memory_order_relaxed);
+  }
+}

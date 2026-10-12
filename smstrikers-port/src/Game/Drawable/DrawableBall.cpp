@@ -8,6 +8,7 @@
 #include "NL/gl/glModel.h"
 #include "NL/gl/glState.h"
 #include "NL/gl/glUserData.h"
+#include "port/xr_quest.h" // strikers-quest: a bigger ball on the Tabletop field
 
 static int g_nMotionBlurDivs = 5;
 static float g_fMotionBlurAlpha0 = 0.1f;
@@ -164,7 +165,19 @@ void DrawableBall::Render() const
     DrawableObject* pDrawableBall = g_pBall->GetDrawableBall();
     pDrawableBall->m_orientation = mOrientation;
     pDrawableBall->m_worldMatrixUpToDate = 0;
-    pDrawableBall->m_translation = mPosition;
+    // PORT (strikers-quest): on the Tabletop field the ball grows with the players (Lance,
+    // 2026-10-10), drawn only. Resting, its centre is one radius above the grass, so it is lifted by
+    // the extra radius to keep sitting on it (Ball.cpp rests it at z 0.18); in the air the lift stays
+    // that small.
+    const float fScale = PortXrCharacterScale();
+    nlVector3 v3Drawn = mPosition;
+    if (fScale != 1.0f)
+    {
+        const float fRest = v3Drawn.z < 0.0f ? 0.0f : (v3Drawn.z > 0.18f ? 0.18f : v3Drawn.z);
+        v3Drawn.z += (fScale - 1.0f) * fRest;
+    }
+    pDrawableBall->m_scale = fScale;
+    pDrawableBall->m_translation = v3Drawn;
     pDrawableBall->m_worldMatrixUpToDate = 0;
 
     unsigned long uSavedFlags = pDrawableBall->m_uObjectCreationFlags;

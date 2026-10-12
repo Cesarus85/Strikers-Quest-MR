@@ -4,6 +4,8 @@
 #include "NL/gl/glState.h"
 #include "NL/gl/glDraw2.h"
 
+#include "port/xr_quest.h" // strikers-quest: the flash over the whole headset view
+
 static s32 sNumFlashFadeFrames = 8;
 
 s32 PhotoFlash::sNumFramesSinceFlash = 999;
@@ -29,7 +31,9 @@ void PhotoFlash::Render(float dt)
     u8 value;
     // PORT: the console's fade was sNumFlashFadeFrames fields of wall time, and the frame rate here is not the field rate.
     const float fadeSeconds = (float)sNumFlashFadeFrames / 60.0f;
-    if (sSecondsSinceFlash < fadeSeconds)
+    // PORT (strikers-quest): in the headset the flash lights up your whole view instead.
+    if (sSecondsSinceFlash < fadeSeconds &&
+        !PortXrScreenFlash(1.0f, 1.0f, 1.0f, 1.0f - sSecondsSinceFlash / fadeSeconds))
     {
         glSetDefaultState(false);
         glSetRasterState(GLS_AlphaBlend, 2);

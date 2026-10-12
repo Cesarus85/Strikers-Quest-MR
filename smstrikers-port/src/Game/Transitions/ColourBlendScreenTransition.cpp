@@ -6,6 +6,8 @@
 
 #include "strtold.h"
 
+#include "port/xr_quest.h" // strikers-quest: flashes over the whole headset view
+
 /**
  * Offset/Address/Size: 0x380 | 0x80205044 | size: 0x10
  */
@@ -39,6 +41,15 @@ void ColourBlendScreenTransition::Render(eGLView view)
     }
 
     v4Clr = tmp;
+
+    // PORT (strikers-quest): in the headset a bright flash (the white flash of the replay wipes)
+    // lights up your whole view instead of only the game picture; dark fades stay here.
+    static const u32 s_plainWhite = glHash("global/white");
+    if (m_nTexture == s_plainWhite && PortXrScreenFlash(v4Clr.x, v4Clr.y, v4Clr.z, v4Clr.w))
+    {
+        return;
+    }
+
     nlColourSet(colour,
         (u8)(255.0f * v4Clr.x),
         (u8)(255.0f * v4Clr.y),

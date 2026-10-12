@@ -20,6 +20,8 @@
 extern "C" void PortDebugFrame(void);   // PORT: defined in Game.cpp
 #include "port/launch.h"
 #include "port/touch.h"     // PORT: the on-screen controls, Android only
+#include "port/xr_quest.h"  // strikers-quest: the OpenXR layer, Quest only
+#include "port/xr_net.h"    // strikers-quest: online 1v1
 #include "port/shaders.h"   // PORT: the shader stage, held on the memory card screen
 #include <aurora/main.h>   // #define main aurora_main
 #include <aurora/event.h>
@@ -771,10 +773,21 @@ int main(int argc, char* argv[])
         cfg.mem2Size = 0;
         // PORT: aurora_initialize reads startFullscreen, the window icon and the cache directory once, so they are chosen here.
         PortAuroraConfigure(&cfg);
+        // strikers-quest: headless before init. In an immersive Quest activity the window has no
+        // usable surface (Dawn's VkSurface creation crashes on it), and the headset never shows it.
+        if (PortXrWanted())
+            aurora_xr_set_surface_suppressed(true);
         AuroraInfo info = aurora_initialize(argc, argv, &cfg);
 
+        // strikers-quest: under an OpenXR session the game plays on a 16:9 screen in the headset,
+        // so the Activity window's shape means nothing.
+        const bool xrActive = PortXrInit() != 0;
+
         // STRIKERS_ASPECT=auto takes the shape of the window.
-        PortSetWindowAspect(info.windowSize.width, info.windowSize.height);
+        if (xrActive)
+            PortSetWindowAspect(1920, 1080);
+        else
+            PortSetWindowAspect(info.windowSize.width, info.windowSize.height);
 
         // PORT: cap to the display's refresh rate rather than to a constant.
         {
@@ -813,7 +826,12 @@ int main(int argc, char* argv[])
                 scale = 3.0f;
             if (scale < 1.0f)
                 scale = 1.0f;
-            aurora_set_frame_buffer_scale(PortEnvFloat("STRIKERS_RES_SCALE", scale));
+            // strikers-quest: in the headset the window height is not the screen's, so a fixed
+            // scale (about 1600x900 on a 16:9 screen) instead; STRIKERS_XR_RES_SCALE overrides.
+            if (xrActive)
+                aurora_set_frame_buffer_scale(PortEnvFloat("STRIKERS_XR_RES_SCALE", 2.0f));
+            else
+                aurora_set_frame_buffer_scale(PortEnvFloat("STRIKERS_RES_SCALE", scale));
         }
 
         // Hold the render target at the VI mode's aspect.
@@ -854,6 +872,67 @@ int main(int argc, char* argv[])
 
     while (s_portRunning && !PortQuitRequested())
     {
+        // strikers-quest: the headset paces the loop (xrWaitFrame) and PortXrBeginFrame says when a
+        // 60 Hz game frame is due, so neither the limiter nor the touch overlay runs here.
+        if (PortXrActive())
+        {
+            PortBenchInputPumped();
+            PortPumpAuroraEvents();
+            // Clears the virtual pad on idle frames; the XR input written next must come after it.
+            PortUpdateSyntheticInput(s_portFrame);
+            PortDebugFrame();
+            if (PortXrShouldQuit())
+            {
+                s_portRunning = false;
+                break;
+            }
+            // Phase times for the headset stats line (where a slow 3D frame goes).
+            const unsigned long long xt0 = port_monotonic_ns();
+            const int tick = PortXrBeginFrame();   // XR events, wait/begin frame, Touch -> PAD
+            const unsigned long long xt1 = port_monotonic_ns();
+            unsigned long long xt2 = xt1, xt3 = xt1, xt4 = xt1;
+            int ranGameFrame = 0;
+            if (tick && aurora_begin_frame())
+            {
+                xt2 = port_monotonic_ns();
+                PortPromptsFrame();
+                PortBenchFrameBegin();
+                PortInvokePadSamplingCallback();
+                // strikers-quest r39b: the online frame is used up only here, once the frame runs. A
+                // frame aurora_begin_frame refuses keeps its inputs and seed for the next try.
+                PortNetCommitFrame();
+                PortNetGameFrameBegin();              // strikers-quest: online match (seed, setup)
+                nlTaskManager::RunAllTasks();
+                UpdateProfile();
+                PortBenchAfterTasks();
+                PortCelebrationPoll();                // strikers-quest: goal / replay / skip edges
+                PortOverlayDraw();
+                xt3 = port_monotonic_ns();
+                aurora_end_frame();
+                xt4 = port_monotonic_ns();
+                PortBenchFrameEnd();
+                s_portFrame++;
+                ranGameFrame = 1;
+            }
+            // Every headset frame, not every game frame: it renders whatever the device has played
+            // since the last call, and at 72 Hz with a 60 Hz game the gaps between game frames
+            // reach 28 ms, enough to run the queue dry (the r2 crackle).
+            // r39: but not once no game frame has run for 100 ms (an online freeze waiting for the
+            // friend, the headset menu). Audio streams refill from the disc as they play, and those
+            // reads only complete inside game frames: with no frames the 32 read records ran out and
+            // the friend's game crashed when frames came back (2026-10-11). Silence instead.
+            static unsigned long long s_lastGameFrameNs = 0;
+            if (ranGameFrame)
+                s_lastGameFrameNs = port_monotonic_ns();
+            if (ranGameFrame || (s_lastGameFrameNs != 0 && port_monotonic_ns() - s_lastGameFrameNs < 100000000ull))
+                PortAudioUpdate();
+            const unsigned long long xt5 = port_monotonic_ns();
+            PortXrEndFrame(ranGameFrame);          // new frame to the screen, xrEndFrame
+            PortXrNoteLoopTimes(ranGameFrame, xt1 - xt0, xt2 - xt1, xt3 - xt2, xt4 - xt3,
+                                port_monotonic_ns() - xt5);
+            continue;
+        }
+
         // PORT: the deferred limiter sleep goes before the event pump so the frame reads input after it.
         PortLimiterFlush();
         PortBenchInputPumped();
@@ -924,6 +1003,7 @@ int main(int argc, char* argv[])
         }
     }
     PortBenchReport();
+    PortXrShutdown();
     aurora_shutdown();
     return 0;
 #else

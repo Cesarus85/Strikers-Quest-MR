@@ -170,6 +170,33 @@ bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out);
 /// active render pass or while any offscreen pass is already open.
 bool create_pass(uint32_t width, uint32_t height);
 
+/// strikers-quest (from aurora-vr): a caller-owned color target for create_pass_external().
+/// `view` must be a view of `texture` in `format`, and `format` must be color_format() so the same
+/// pipelines apply. The texture needs RenderAttachment, CopySrc and TextureBinding usages.
+struct ExternalPassTarget {
+  wgpu::Texture texture;
+  wgpu::TextureView view;
+  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  /// strikers-quest: 4 renders into a pooled multisampled color + depth target that resolves into
+  /// `texture` when the pass ends (smooth edges on the headset); 1 renders into it directly.
+  uint32_t sampleCount = 1;
+};
+
+/// create_pass() with the caller's own color target instead of a pooled offscreen texture (depth
+/// is still pooled). The pass counts as consumed (its output IS the external texture), so close
+/// it with resolve_pass({.color = false}). The headset eye passes render straight into the XR
+/// swapchain's shared images through this.
+bool create_pass_external(const ExternalPassTarget& target);
+
+/// What GX viewport/scissor scaling treats as the "logical" frame size while an offscreen pass is
+/// open: off (default), the pass's own size; on, the native configured size, for callers that
+/// replay the full-scene draw path (which sets its viewport in native units) into a larger target.
+/// Scope it to the caller's own pass.
+void set_offscreen_uses_native_logical_size(bool enabled) noexcept;
+bool offscreen_uses_native_logical_size() noexcept;
+
 /// True while an offscreen pass (create_pass or GXCreateFrameBuffer) is open.
 bool is_offscreen() noexcept;
 

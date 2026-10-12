@@ -366,10 +366,176 @@ void resolve() {
 }
 } // namespace capture
 
+// strikers-quest: see aurora_xr_set_surface_suppressed / aurora_xr_set_frame_callback in aurora.h.
+// Same encoder-and-readback shape as capture above, but every frame, and never waiting on the GPU:
+// a ring of buffers, each frame copying into a free one and handing the callback the newest one
+// whose map has completed (normally last frame's). Waiting for the map in the same frame made the
+// render worker, and through synchronize() the game thread, wait for the GPU to finish every frame,
+// so CPU and GPU never overlapped (r4: 11 ms per frame in a match, 30 ms with the 3D modes on).
+namespace xr_present {
+std::atomic<bool> g_suppressSurface{false};
+std::atomic<AuroraXrFrameCallback> g_callback{nullptr};
+std::atomic<void*> g_user{nullptr};
+
+enum class SlotState { Free, Copying, Mapping, Mapped };
+struct Slot {
+  wgpu::Buffer buffer;
+  SlotState state = SlotState::Free;
+  uint64_t serial = 0;
+  std::atomic<int> mapResult{0}; // 0 pending, 1 ok, -1 failed
+};
+constexpr int kSlots = 3;
+Slot g_slots[kSlots];
+uint32_t g_width = 0, g_height = 0, g_paddedRow = 0;
+bool g_bgra = false;
+int g_recordedSlot = -1;
+uint64_t g_serial = 0;
+
+void reset_slots() {
+  for (auto& s : g_slots) {
+    if (s.buffer != nullptr) {
+      if (s.state == SlotState::Mapped) {
+        s.buffer.Unmap();
+      }
+      s.buffer.Destroy();
+      s.buffer = nullptr;
+    }
+    s.state = SlotState::Free;
+  }
+}
+
+void record(const wgpu::CommandEncoder& encoder) {
+  g_recordedSlot = -1;
+  if (g_callback.load(std::memory_order_acquire) == nullptr) {
+    return;
+  }
+  const auto& src = webgpu::present_source();
+  if (src.texture == nullptr) {
+    return;
+  }
+  const uint32_t width = src.size.width;
+  const uint32_t height = src.size.height;
+  if (width == 0 || height == 0) {
+    return;
+  }
+  if (width != g_width || height != g_height) {
+    // Mid-map buffers cannot be destroyed safely while a callback is outstanding; let them finish.
+    for (auto& s : g_slots) {
+      if (s.state == SlotState::Mapping) {
+        return;
+      }
+    }
+    reset_slots();
+    g_width = width;
+    g_height = height;
+    g_paddedRow = capture::align_up(width * 4, capture::kRowAlign);
+  }
+  int slot = -1;
+  for (int i = 0; i < kSlots; ++i) {
+    if (g_slots[i].state == SlotState::Free) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    return; // GPU behind by the whole ring: skip this frame's copy, the screen keeps the last one
+  }
+  Slot& s = g_slots[slot];
+  if (s.buffer == nullptr) {
+    const wgpu::BufferDescriptor bufDesc{
+        .label = "XR frame readback",
+        .usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead,
+        .size = static_cast<uint64_t>(g_paddedRow) * g_height,
+    };
+    s.buffer = webgpu::g_device.CreateBuffer(&bufDesc);
+    if (s.buffer == nullptr) {
+      return;
+    }
+  }
+  g_bgra = src.format == wgpu::TextureFormat::BGRA8Unorm || src.format == wgpu::TextureFormat::BGRA8UnormSrgb;
+
+  const wgpu::TexelCopyTextureInfo copySrc{
+      .texture = src.texture,
+      .mipLevel = 0,
+      .origin = {0, 0, 0},
+      .aspect = wgpu::TextureAspect::All,
+  };
+  const wgpu::TexelCopyBufferInfo copyDst{
+      .layout = {.offset = 0, .bytesPerRow = g_paddedRow, .rowsPerImage = g_height},
+      .buffer = s.buffer,
+  };
+  const wgpu::Extent3D extent{g_width, g_height, 1};
+  encoder.CopyTextureToBuffer(&copySrc, &copyDst, &extent);
+  s.state = SlotState::Copying;
+  s.serial = ++g_serial;
+  g_recordedSlot = slot;
+}
+
+// After the frame has been submitted, on the render worker. Starts this frame's map without
+// waiting, then delivers the newest completed one.
+void resolve() {
+  const AuroraXrFrameCallback callback = g_callback.load(std::memory_order_acquire);
+  if (g_recordedSlot >= 0) {
+    Slot& s = g_slots[g_recordedSlot];
+    s.mapResult.store(0, std::memory_order_release);
+    s.state = SlotState::Mapping;
+    const uint64_t total = static_cast<uint64_t>(g_paddedRow) * g_height;
+    Slot* sp = &s;
+    s.buffer.MapAsync(wgpu::MapMode::Read, 0, static_cast<size_t>(total), wgpu::CallbackMode::AllowProcessEvents,
+                      [sp](wgpu::MapAsyncStatus status, wgpu::StringView) {
+                        sp->mapResult.store(status == wgpu::MapAsyncStatus::Success ? 1 : -1,
+                                            std::memory_order_release);
+                      });
+    g_recordedSlot = -1;
+  }
+  webgpu::g_instance.ProcessEvents();
+
+  int newest = -1;
+  for (int i = 0; i < kSlots; ++i) {
+    Slot& s = g_slots[i];
+    if (s.state != SlotState::Mapping) {
+      continue;
+    }
+    const int r = s.mapResult.load(std::memory_order_acquire);
+    if (r < 0) {
+      s.state = SlotState::Free; // failed map: give the buffer back
+    } else if (r > 0) {
+      s.state = SlotState::Mapped;
+    }
+  }
+  for (int i = 0; i < kSlots; ++i) {
+    if (g_slots[i].state == SlotState::Mapped && (newest < 0 || g_slots[i].serial > g_slots[newest].serial)) {
+      newest = i;
+    }
+  }
+  if (newest >= 0 && callback != nullptr) {
+    const uint64_t total = static_cast<uint64_t>(g_paddedRow) * g_height;
+    const auto* mapped =
+        static_cast<const uint8_t*>(g_slots[newest].buffer.GetConstMappedRange(0, static_cast<size_t>(total)));
+    if (mapped != nullptr) {
+      callback(mapped, g_width, g_height, g_paddedRow, g_bgra, g_user.load(std::memory_order_acquire));
+    }
+  }
+  // Every mapped buffer goes back to the ring, delivered or superseded.
+  for (auto& s : g_slots) {
+    if (s.state == SlotState::Mapped) {
+      s.buffer.Unmap();
+      s.state = SlotState::Free;
+    }
+  }
+}
+} // namespace xr_present
+
 bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
-  {
+  // strikers-quest: under an XR session the window surface is never presented, so whether the
+  // Activity surface is presentable has no bearing on whether a frame can be drawn.
+  if (xr_present::g_suppressSurface.load(std::memory_order_acquire)) {
+    if (window::is_paused()) {
+      return false;
+    }
+  } else {
     if (!window::is_presentable()) {
       webgpu::release_surface();
       return false;
@@ -429,9 +595,11 @@ void end_frame() noexcept {
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
+    // strikers-quest: no surface acquire under an XR session; see aurora_xr_set_surface_suppressed.
+    const bool surfaceSuppressed = xr_present::g_suppressSurface.load(std::memory_order_acquire);
     {
       window::SurfaceLock surfaceLock;
-      if (window::is_presentable() && g_surface) {
+      if (!surfaceSuppressed && window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
@@ -502,9 +670,10 @@ void end_frame() noexcept {
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
-    } else {
+    } else if (!surfaceSuppressed) {
       Log.info("Skipping present; window not presentable");
     }
+    xr_present::record(encoder); // strikers-quest
     capture::record(encoder);   // smstrikers-port
     webgpu::gpu_prof::frame_end(encoder);
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
@@ -525,6 +694,7 @@ void end_frame() noexcept {
           });
     }
     capture::resolve();
+    xr_present::resolve(); // strikers-quest
     webgpu::gpu_prof::after_submit();
     if (canPresent && g_surface) {
       ZoneScopedN("Present");
@@ -541,7 +711,7 @@ void end_frame() noexcept {
         Log.warn("Surface present failed");
         webgpu::release_surface();
       }
-    } else if (g_surface) {
+    } else if (g_surface && !surfaceSuppressed) {
       switch (surfaceStatus) {
       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
         Log.warn("Surface texture acquisition timed out");
@@ -640,6 +810,15 @@ void aurora_capture_frame(const char* path) {
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }
 void aurora_end_frame() { aurora::end_frame(); }
+void aurora_xr_set_surface_suppressed(bool suppressed) {
+  // Before aurora_initialize this also means "never create a window surface" (gpu.hpp g_xrHeadless).
+  aurora::webgpu::g_xrHeadless = suppressed;
+  aurora::xr_present::g_suppressSurface.store(suppressed, std::memory_order_release);
+}
+void aurora_xr_set_frame_callback(AuroraXrFrameCallback callback, void* user) {
+  aurora::xr_present::g_user.store(user, std::memory_order_release);
+  aurora::xr_present::g_callback.store(callback, std::memory_order_release);
+}
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
 const AuroraBackend* aurora_get_available_backends(size_t* count) {
   if (count != nullptr) {

@@ -243,6 +243,14 @@ void DVDInit(void)
     // too late; this runs *before* main.
     PortConfigLoad();
 
+    // strikers-quest: STRIKERS_DISC_SELFTEST=<image> reads every file on that disc through
+    // port_disc (a check of a format such as .rvz) and logs what it found; then the game starts.
+    {
+        const char* selftest = getenv("STRIKERS_DISC_SELFTEST");
+        if (selftest != NULL && *selftest != '\0')
+            port_disc_selftest(selftest);
+    }
+
     const char* env = getenv("STRIKERS_DATA");
     const char* why = "STRIKERS_DATA / the 'data' key in strikers.ini";
     if (env != NULL && *env != '\0')

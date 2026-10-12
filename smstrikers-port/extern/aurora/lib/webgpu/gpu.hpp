@@ -56,6 +56,15 @@ extern bool g_hasCoreFeatures;
 extern bool g_bcTexturesSupported;
 extern bool g_astcTexturesSupported;
 extern bool g_textureComponentSwizzleSupported;
+// strikers-quest: no window surface at all. Under an OpenXR session on Quest the Activity's
+// ANativeWindow is not a valid presentation target (creating a VkSurface on it crashes inside
+// libvulkan), and nothing is ever presented to it anyway. Set through
+// aurora_xr_set_surface_suppressed() BEFORE aurora_initialize().
+extern bool g_xrHeadless;
+// strikers-quest: Dawn was created with SharedTextureMemoryOpaqueFD and a shared-fence feature
+// (SyncFD, or VkSemaphoreOpaqueFD), so an XR-side opaque-fd VkImage can be imported and handed
+// back with a GPU fence. Android only; false everywhere else.
+extern bool g_vulkanSharedImageExportSupported;
 
 bool initialize(AuroraBackend backend, bool allowCpu);
 void shutdown();

@@ -148,6 +148,17 @@ const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();
 
+/* strikers-quest: XR present hooks.
+ * While suppressed, end_frame neither acquires nor presents the window surface: under an OpenXR
+ * session on Quest the Activity surface is invisible, and acquiring it stalls the render worker.
+ * With a frame callback set, end_frame reads the presented frame (the GX framebuffer, no ImGui)
+ * back every frame on the render worker and hands the mapped pixels to the callback, which must
+ * copy what it needs before returning. NULL turns the readback off. */
+typedef void (*AuroraXrFrameCallback)(const uint8_t* pixels, uint32_t width, uint32_t height,
+                                      uint32_t bytesPerRow, bool bgra, void* user);
+void aurora_xr_set_surface_suppressed(bool suppressed);
+void aurora_xr_set_frame_callback(AuroraXrFrameCallback callback, void* user);
+
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);
 void aurora_set_background_input(bool value);

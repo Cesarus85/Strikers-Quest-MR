@@ -21,6 +21,10 @@ import dev.encounter.aurora.AuroraSurface;
 /** O jogo. Tudo que decide se ele pode começar está em {@link SetupActivity}. */
 public class StrikersActivity extends SDLActivity {
 
+    // strikers-quest r39b: how much longer than SDL's own 1 s a closing game thread gets before the
+    // process ends anyway (onDestroy).
+    private static final long GAME_THREAD_GRACE_MS = 5000;
+
     private OverlayView overlay;
     private HudView hud;
     private Preferencias prefs;
@@ -51,10 +55,41 @@ public class StrikersActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // strikers-quest r39b: SDL starts once per process; a second onCreate in the same one ends
+        // the process on the spot (SDLActivity's recreate guard calls System.exit). This process
+        // ends with the game (onDestroy), so the only way here is a start while the last game is
+        // still shutting down, or Android recreating the activity for a configuration change. Send
+        // the player back to the launcher panel to start again, and end this process once the last
+        // game's thread is done, rather than vanish.
+        if (mActivityCreated || mSDLMainFinished) {
+            android.util.Log.w("strikers", "the game is still closing in this process, back to the panel");
+            startActivity(new android.content.Intent(this, LobbyActivity.class));
+            waitForGameThread(mSDLThread);
+            android.os.Process.killProcess(android.os.Process.myPid());
+            super.onCreate(savedInstanceState);  // not reached; if it were, SDL's guard ends the process
+            return;
+        }
+        // strikers-quest: the disc sits in Download, which takes "all files access". r39b: the
+        // launcher panel asks for it before it starts the game (LobbyActivity.start). This is for a
+        // start that did not come through the panel (adb, a self-test): open that switch and close.
+        // Android insists on super.onCreate even so, and SDL has then run in this process, which
+        // onDestroy ends, so the next start gets a fresh one.
+        if (!StrikersHome.hasAllFilesAccess() && !StrikersHome.hasGameData(this)
+                && LobbyActivity.askForFileAccess(this)) {
+            super.onCreate(savedInstanceState);
+            finish();
+            return;
+        }
         // Antes do super, que é quem carrega o libmain.so: o jogo lê a
         // configuração do ambiente num construtor de biblioteca, então o que for
         // definido depois disto é tarde demais.
         StrikersHome.prepare(this);
+        // strikers-quest r39: the online room picked in the launcher panel (LobbyActivity), "" for
+        // offline. The network layer reads it when the game first polls the network.
+        // r39b: only when the panel passed one. A start without it (adb, a self-test) keeps what
+        // env.txt set in prepare just above, or no room at all.
+        final android.content.Intent start = getIntent();
+        if (start != null && start.hasExtra(LobbyActivity.EXTRA_ROOM)) setRoomEnv(roomFrom(start));
         super.onCreate(savedInstanceState);
 
         // Uma partida são minutos segurando o manche numa direção, o que nenhum
@@ -83,6 +118,40 @@ public class StrikersActivity extends SDLActivity {
 
         prepararVidro();
         seguirControleFisico();
+    }
+
+    /** strikers-quest r39: src/platform/xr_net.cpp; takes effect between matches. */
+    private static native void nativeSetRoom(String room);
+
+    private static String roomFrom(android.content.Intent intent) {
+        String room = intent != null ? intent.getStringExtra(LobbyActivity.EXTRA_ROOM) : null;
+        return room != null ? LobbyActivity.clean(room) : "";
+    }
+
+    private static void setRoomEnv(String room) {
+        try {
+            android.system.Os.setenv("STRIKERS_ROOM", room, true);
+        } catch (android.system.ErrnoException e) {
+            android.util.Log.e("strikers", "setenv STRIKERS_ROOM failed", e);
+        }
+    }
+
+    @Override
+    protected void onNewIntent(android.content.Intent intent) {
+        super.onNewIntent(intent);
+        // The game was already running and the panel picked a room (or offline) again.
+        if (intent != null && intent.hasExtra(LobbyActivity.EXTRA_ROOM)) {
+            setIntent(intent);
+            final String room = roomFrom(intent);
+            // strikers-quest r39b: not into the environment as well. The game thread may be reading
+            // it right now, and setenv can move the whole table under it. nativeSetRoom alone is
+            // enough: the network layer only reads STRIKERS_ROOM when nothing came through it.
+            try {
+                nativeSetRoom(room);
+            } catch (UnsatisfiedLinkError e) {
+                android.util.Log.w("strikers", "no native room switch in this build", e);
+            }
+        }
     }
 
     /**
@@ -188,6 +257,39 @@ public class StrikersActivity extends SDLActivity {
     @Override
     protected void onDestroy() {
         relogio.removeCallbacksAndMessages(null);
+        // strikers-quest r39b: taken before SDL's onDestroy, which tells the game thread to quit and
+        // waits for it, but for 1 s at most.
+        final Thread game = mSDLThread;
         super.onDestroy();
+        // strikers-quest r39b: SDL starts once per process (see onCreate), so this activity has a
+        // process of its own (":game", AndroidManifest.xml) and the process ends here with it: the
+        // next start from the panel gets a fresh one. Not before the game thread is done: it
+        // finishes the frame it is in (memory card saves are written inside frames), then shuts
+        // down Vulkan and OpenXR. That wait runs on a thread of its own, so this one is not held
+        // up, and gives up after GAME_THREAD_GRACE_MS. Not at all for a configuration change:
+        // Android creates the activity again at once, and onCreate sends that start to the panel.
+        if (isChangingConfigurations()) return;
+        final Runnable end = () -> android.os.Process.killProcess(android.os.Process.myPid());
+        if (game == null || !game.isAlive()) {
+            relogio.post(end);
+            return;
+        }
+        new Thread(() -> {
+            waitForGameThread(game);
+            relogio.post(end);
+        }, "strikers-end").start();
+    }
+
+    /** strikers-quest r39b: waits for a closing game thread, up to GAME_THREAD_GRACE_MS. */
+    private static void waitForGameThread(Thread game) {
+        if (game == null) return;
+        try {
+            game.join(GAME_THREAD_GRACE_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (game.isAlive()) {
+            android.util.Log.w("strikers", "the game thread did not finish, ending the process anyway");
+        }
     }
 }

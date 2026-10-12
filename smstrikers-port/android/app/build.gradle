@@ -18,8 +18,10 @@ android {
         // asks for nothing newer.
         minSdk 28
         targetSdk 35
-        versionCode 1
-        versionName '1.2.0'
+        // strikers-quest: the Quest alpha's own numbers (the phone port was 1 / 1.2.0). Raise
+        // versionCode with every public build so an update installs over the last one.
+        versionCode 3902
+        versionName '0.1-alpha1 (r39b)'
         ndk {
             // The only ABI the prebuilt Dawn package exists for, and the only one worth shipping:
             // a 32-bit build would not address the game's heap comfortably, and x86 Android is

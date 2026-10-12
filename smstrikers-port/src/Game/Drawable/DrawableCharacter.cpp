@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include "port/input.h"
+#include "port/xr_quest.h" // strikers-quest: bigger players on the Tabletop field
 // Hoisted: Game/Replay.h's ReplayablePolymorphicPtr calls the qualified ::Replayable<N>, which ADL cannot rescue.
 class LoadFrame;
 class SaveFrame;
@@ -240,6 +242,34 @@ cPN_SAnimController& DrawableCharacter::GetAnimController() const
     return *mCharacter->m_pCurrentAnimController;
 }
 
+// PORT (strikers-quest): on the Tabletop field the players are drawn bigger (Lance, 2026-10-10:
+// they looked tiny next to the pitch). Every node matrix of the drawn pose is scaled about the
+// player's feet; gameplay keeps its own pose, so speed, reach and collisions do not change.
+static void ScaleNodesAboutFeet(cPoseAccumulator* acc, const nlVector3& feet)
+{
+    const float k = PortXrCharacterScale();
+    if (k == 1.0f || acc == NULL)
+    {
+        return;
+    }
+    for (int i = 0; i < acc->GetNumNodes(); i++)
+    {
+        nlMatrix4& m = acc->GetNodeMatrix(i);
+        m.m11 *= k;
+        m.m12 *= k;
+        m.m13 *= k;
+        m.m21 *= k;
+        m.m22 *= k;
+        m.m23 *= k;
+        m.m31 *= k;
+        m.m32 *= k;
+        m.m33 *= k;
+        m.m41 = feet.x + k * (m.m41 - feet.x);
+        m.m42 = feet.y + k * (m.m42 - feet.y);
+        m.m43 = feet.z + k * (m.m43 - feet.z);
+    }
+}
+
 /**
  * Offset/Address/Size: 0x2A1C | 0x8011B8CC | size: 0x17C
  */
@@ -281,6 +311,8 @@ void DrawableCharacter::Grab(cCharacter& character)
         mHeadPosition = *(nlVector3*)&mPoseAccumulator->GetNodeMatrix(character.m_nHeadJointIndex).e2[3];
         mHeight = mBip01Position.z;
     }
+
+    ScaleNodesAboutFeet(mPoseAccumulator, mPosition); // PORT (strikers-quest)
 
     EffectsTexturing* tex = character.m_pEffectsTexturing;
     if (tex == NULL)
@@ -337,6 +369,7 @@ void DrawableCharacter::BuildNodeMatrices()
 
     if (mCharacter != nullptr)
     {
+        ScaleNodesAboutFeet(mPoseAccumulator, mPosition); // PORT (strikers-quest): players only
         mPoseAccumulator->SetBuildNodeMatrixCallback(
             mCharacter->m_nHeadJointIndex,
             nullptr,
@@ -1064,6 +1097,8 @@ void DrawableCharacter::Blend(const float* blendFactors, const DrawableCharacter
     mPoseAccumulator->BuildNodeMatrices(rotMatrix);
     if (mCharacter != nullptr)
     {
+        // PORT (strikers-quest): live play draws this blended pose, rebuilt from scratch here.
+        ScaleNodesAboutFeet(mPoseAccumulator, mPosition);
         mPoseAccumulator->SetBuildNodeMatrixCallback(mCharacter->m_nHeadJointIndex, nullptr, 0, 0);
     }
     else if (mBowser != nullptr)
@@ -1116,6 +1151,7 @@ void DrawableCharacter::EvaluateFrom(const cPoseNode& poseNode, const nlVector3&
 
     if (mCharacter != nullptr)
     {
+        ScaleNodesAboutFeet(mPoseAccumulator, mPosition); // PORT (strikers-quest)
         mPoseAccumulator->SetBuildNodeMatrixCallback(
             mCharacter->m_nHeadJointIndex,
             nullptr,
@@ -1154,7 +1190,23 @@ nlVector3 DrawableCharacter::GetBallPosition() const
 nlQuaternion DrawableCharacter::GetBallOrientation() const
 {
     nlQuaternion ret;
-    nlMatrixToQuat(ret, mPoseAccumulator->GetNodeMatrix(((cPlayer*)mCharacter)->m_nBallJointIndex));
+    // PORT (strikers-quest): the drawn pose may be scaled (Tabletop); take the rotation alone.
+    nlMatrix4 m = mPoseAccumulator->GetNodeMatrix(((cPlayer*)mCharacter)->m_nBallJointIndex);
+    const float k = sqrtf(m.m11 * m.m11 + m.m12 * m.m12 + m.m13 * m.m13);
+    if (k > 1e-4f && fabsf(k - 1.0f) > 1e-3f)
+    {
+        const float inv = 1.0f / k;
+        m.m11 *= inv;
+        m.m12 *= inv;
+        m.m13 *= inv;
+        m.m21 *= inv;
+        m.m22 *= inv;
+        m.m23 *= inv;
+        m.m31 *= inv;
+        m.m32 *= inv;
+        m.m33 *= inv;
+    }
+    nlMatrixToQuat(ret, m);
     return ret;
 }
 

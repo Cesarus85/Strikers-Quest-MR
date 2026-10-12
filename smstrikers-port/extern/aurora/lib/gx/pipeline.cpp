@@ -34,7 +34,10 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
   }
   pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
-  if (data.dstAlpha != UINT32_MAX) {
+  if (data.dstAlpha == XrCoverageDstAlpha) {
+    const wgpu::Color color{0.f, 0.f, 0.f, 1.f};  // strikers-quest: solid draws are fully covered
+    pass.SetBlendConstant(&color);
+  } else if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);
   }

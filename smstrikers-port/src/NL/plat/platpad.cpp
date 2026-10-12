@@ -1,5 +1,6 @@
 #include "NL/platpad.h"
 #include "port/overlay.h"
+#include "port/xr_quest.h" // strikers-quest: rumble on the Touch controllers
 #include <stdlib.h>
 #include "dolphin/os.h"
 
@@ -191,6 +192,7 @@ void cPlatPad::StopRumble()
 {
     padStatus[0].m_GameCubePads[m_padIndex].bRumbleActive = 0;
     PADControlMotor(m_padIndex, 2);
+    PortXrRumbleStop(m_padIndex); // strikers-quest: Touch controllers
 }
 
 /**
@@ -201,6 +203,7 @@ void cPlatPad::StartRumble(float fDuration, float fIntensity, float fFrequency)
     if (m_bDisableRumble == 0)
     {
         PADControlMotor(m_padIndex, 1);
+        PortXrRumbleStart(m_padIndex, fDuration); // strikers-quest: Touch controllers
         padStatus[0].m_GameCubePads[m_padIndex].fRumbleTimer = fDuration;
         padStatus[0].m_GameCubePads[m_padIndex].bRumbleActive = 1;
     }

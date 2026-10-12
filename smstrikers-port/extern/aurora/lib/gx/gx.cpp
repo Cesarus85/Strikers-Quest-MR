@@ -29,6 +29,18 @@ using webgpu::g_device;
 using webgpu::g_graphicsConfig;
 
 GXState g_gxState{};
+std::atomic<bool> g_xrCoverage{false};
+
+} // namespace aurora::gx
+
+// strikers-quest: see gx.hpp g_xrCoverage. Call only with the GX FIFO drained.
+extern "C" void aurora_gx_set_xr_coverage(bool enabled) {
+  if (aurora::gx::g_xrCoverage.exchange(enabled, std::memory_order_relaxed) != enabled) {
+    aurora::gx::g_gxState.dirty |= aurora::gx::DirtyPipeline;  // the cached pipeline is the other kind
+  }
+}
+
+namespace aurora::gx {
 wgpu::BindGroup g_emptyTextureBindGroup;
 
 namespace {
@@ -162,7 +174,32 @@ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendF
     break;
   }
   wgpu::BlendComponent alphaBlendComponent;
-  if (dstAlpha != UINT32_MAX) {
+  if (dstAlpha == XrCoverageDstAlpha) {
+    // Only a draw that lays down its own colour adds coverage. One that adds light (dst factor
+    // ONE), only darkens or tints what is there (src factor ZERO / DSTCLR / INVDSTCLR: shadows,
+    // multiply decals), subtracts, or writes nothing (logic NOOP: invisible planes) leaves the
+    // coverage as it was; otherwise those came out as black shapes over passthrough (r16).
+    const bool srcAddsColour = srcFac == GX_BL_ONE || srcFac == GX_BL_SRCALPHA || srcFac == GX_BL_INVSRCALPHA ||
+                               srcFac == GX_BL_DSTALPHA || srcFac == GX_BL_INVDSTALPHA;
+    const bool solid = mode == GX_BM_NONE || (mode == GX_BM_LOGIC && op == GX_LO_COPY);
+    const bool over = mode == GX_BM_BLEND && srcAddsColour && dstFac != GX_BL_ONE;
+    if (solid) {
+      // Fully covered (the blend constant is 1, pipeline.cpp).
+      alphaBlendComponent = {.operation = wgpu::BlendOperation::Add,
+                             .srcFactor = wgpu::BlendFactor::Constant,
+                             .dstFactor = wgpu::BlendFactor::Zero};
+    } else if (over) {
+      // Blended: coverage accumulates like the colour, "over".
+      alphaBlendComponent = {.operation = wgpu::BlendOperation::Add,
+                             .srcFactor = wgpu::BlendFactor::One,
+                             .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha};
+    } else {
+      // Additive, darkening, subtracting or invisible: as covered as it was.
+      alphaBlendComponent = {.operation = wgpu::BlendOperation::Add,
+                             .srcFactor = wgpu::BlendFactor::Zero,
+                             .dstFactor = wgpu::BlendFactor::One};
+    }
+  } else if (dstAlpha != UINT32_MAX) {
     alphaBlendComponent = wgpu::BlendComponent{
         .operation = wgpu::BlendOperation::Add,
         .srcFactor = wgpu::BlendFactor::Constant,
@@ -229,7 +266,13 @@ void update() noexcept {
 }
 
 Vec2<uint32_t> logical_fb_size() noexcept {
-  return gfx::is_offscreen() ? gfx::get_render_target_size() : vi::configured_fb_size();
+  // strikers-quest (from aurora-vr): the headset eye passes replay the full-scene draw path, whose
+  // viewport is in native units, into an eye-sized target; see
+  // gfx::set_offscreen_uses_native_logical_size.
+  if (gfx::is_offscreen() && !gfx::offscreen_uses_native_logical_size()) {
+    return gfx::get_render_target_size();
+  }
+  return vi::configured_fb_size();
 }
 
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept {
@@ -453,6 +496,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   }
   const auto cullMode = config.shaderConfig.lineMode == 0 ? g_gxState.cullMode : GX_CULL_NONE;
   const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
+  const bool xrCoverage =
+      g_xrCoverage.load(std::memory_order_relaxed) && g_gxState.colorUpdate && cullMode != GX_CULL_ALL;
   config = {
       .msaaSamples = gfx::get_sample_count(),
       .shaderConfig = config.shaderConfig,
@@ -462,7 +507,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .blendFacSrc = g_gxState.blendFacSrc,
       .blendFacDst = g_gxState.blendFacDst,
       .blendOp = g_gxState.blendOp,
-      .dstAlpha = g_gxState.dstAlpha,
+      .dstAlpha = xrCoverage ? XrCoverageDstAlpha : g_gxState.dstAlpha,
       .polygonOffsetBits = std::bit_cast<uint32_t>(polygonOffset),
       .polygonOffsetScaleBits = std::bit_cast<uint32_t>(polygonOffsetScale),
       .polygonOffsetClampBits = std::bit_cast<uint32_t>(g_gxState.clamp),
@@ -470,7 +515,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       // GX_CULL_ALL discards every triangle. wgpu cannot say that, so the draw
       // is made to write nothing instead; see to_primitive_state.
       .depthUpdate = cullMode == GX_CULL_ALL ? false : g_gxState.depthUpdate,
-      .alphaUpdate = cullMode == GX_CULL_ALL ? false : g_gxState.alphaUpdate,
+      .alphaUpdate = cullMode == GX_CULL_ALL ? false : (g_gxState.alphaUpdate || xrCoverage),
       .colorUpdate = cullMode == GX_CULL_ALL ? false : g_gxState.colorUpdate,
   };
 }

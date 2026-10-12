@@ -20,7 +20,9 @@
 
 #include <array>
 #include <cstring>
+#include <map>
 #include <new>
+#include <tuple>
 #include <optional>
 #include <ranges>
 #include <string>
@@ -448,28 +450,97 @@ void finish_current_offscreen() {
   g_recorder.offscreenDepth = {};
 }
 
-void start_offscreen(uint32_t width, uint32_t height) {
+// strikers-quest: multisampled color + depth for external passes (ExternalPassTarget::sampleCount),
+// pooled by size. Both stay on the tiler: the color resolves into the external texture at the end
+// of the pass and neither is stored.
+struct MsaaTargets {
+  wgpu::TextureView color;
+  wgpu::TextureView depth;
+};
+static MsaaTargets get_msaa_targets(uint32_t width, uint32_t height, uint32_t samples, wgpu::TextureFormat format) {
+  static std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, MsaaTargets> cache;
+  const auto key = std::make_tuple(width, height, samples, static_cast<uint32_t>(format));
+  if (const auto it = cache.find(key); it != cache.end()) {
+    return it->second;
+  }
+  const wgpu::TextureDescriptor colorDesc{
+      .label = "Offscreen MSAA Color",
+      .usage = wgpu::TextureUsage::RenderAttachment,
+      .dimension = wgpu::TextureDimension::e2D,
+      .size = {width, height, 1},
+      .format = format,
+      .mipLevelCount = 1,
+      .sampleCount = samples,
+  };
+  const wgpu::TextureDescriptor depthDesc{
+      .label = "Offscreen MSAA Depth",
+      .usage = wgpu::TextureUsage::RenderAttachment,
+      .dimension = wgpu::TextureDimension::e2D,
+      .size = {width, height, 1},
+      .format = webgpu::g_graphicsConfig.depthFormat,
+      .mipLevelCount = 1,
+      .sampleCount = samples,
+  };
+  MsaaTargets targets{
+      .color = webgpu::g_device.CreateTexture(&colorDesc).CreateView(),
+      .depth = webgpu::g_device.CreateTexture(&depthDesc).CreateView(),
+  };
+  cache.emplace(key, targets);
+  return targets;
+}
+
+void start_offscreen(uint32_t width, uint32_t height, const ExternalPassTarget* external = nullptr) {
   AURORA_ASSERT(width != 0 && height != 0, "start_offscreen requires nonzero dimensions ({}x{})", width, height);
   AURORA_ASSERT(g_recorder.active(), "start_offscreen called outside of an active recording frame");
 
   auto offscreenEntry = get_offscreen_textures(width, height);
-  g_recorder.offscreenColor = std::move(offscreenEntry.color);
+  const uint32_t msaa = external != nullptr && external->sampleCount > 1 ? external->sampleCount : 1;
+  MsaaTargets msaaTargets;
+  if (msaa > 1) {
+    msaaTargets = get_msaa_targets(width, height, msaa, external->format);
+    offscreenEntry.depth.view = msaaTargets.depth;
+  }
+  if (external != nullptr) {
+    // strikers-quest (from aurora-vr): caller-owned color target (create_pass_external); depth stays pooled.
+    g_recorder.offscreenColor = webgpu::TextureWithSampler{
+        .texture = external->texture,
+        .view = external->view,
+        .size = {width, height, 1},
+        .format = external->format,
+    };
+  } else {
+    g_recorder.offscreenColor = std::move(offscreenEntry.color);
+  }
   g_recorder.offscreenDepth = std::move(offscreenEntry.depth);
 
   RenderPass newPass{
-      .label = pass_label("Offscreen"),
+      .label = pass_label(external != nullptr ? "Offscreen external" : "Offscreen"),
       .depthStencilView = g_recorder.offscreenDepth.view,
       .depthStencilFormat = g_recorder.offscreenDepth.format,
       .copySourceTexture = g_recorder.offscreenColor.texture,
       .copySourceView = g_recorder.offscreenColor.view,
       .copySourceDepthView = g_recorder.offscreenDepth.view,
-      .msaaSamples = 1,
+      .msaaSamples = msaa,
       .clearDepthValue = gx::UseReversedZ ? 0.f : 1.f,
       .clearDepth = true,
       .hasDepth = true,
       .hasStencil = false,
   };
-  set_single_color_target(newPass, g_recorder.offscreenColor.format, {width, height}, g_recorder.offscreenColor.view);
+  newPass.externalTarget = external != nullptr;
+  if (external != nullptr) {
+    // strikers-quest: the headset's eye passes never read their depth back (PortXrStereoEyeEnd
+    // resolves with depth = false), so on the tiler it can stay in GMEM instead of being written out
+    // every pass.
+    newPass.depthStoreOp = wgpu::StoreOp::Discard;
+  }
+  if (msaa > 1) {
+    // Draw into the multisampled target; the pass end resolves it into the external texture.
+    set_single_color_target(newPass, g_recorder.offscreenColor.format, {width, height}, msaaTargets.color,
+                            g_recorder.offscreenColor.view);
+    newPass.colorAttachments[SceneColorAttachmentIndex].storeOp = wgpu::StoreOp::Discard;
+  } else {
+    set_single_color_target(newPass, g_recorder.offscreenColor.format, {width, height}, g_recorder.offscreenColor.view);
+  }
   current_render_passes().emplace_back(std::move(newPass));
   ++g_recorder.currentRenderPass;
   g_recorder.inOffscreen = true;
@@ -917,7 +988,7 @@ bool push_custom_draw(DrawTypeId type, const void* payload, size_t payloadSize) 
   return true;
 }
 
-void begin_offscreen(uint32_t width, uint32_t height) {
+void begin_offscreen(uint32_t width, uint32_t height, const ExternalPassTarget* external) {
   ZoneScoped;
   AURORA_ASSERT(width != 0 && height != 0, "begin_offscreen requires nonzero dimensions ({}x{})", width, height);
   AURORA_ASSERT(g_recorder.active() && g_recorder.currentRenderPass != UINT32_MAX,
@@ -928,7 +999,7 @@ void begin_offscreen(uint32_t width, uint32_t height) {
   } else {
     suspend_efb();
   }
-  start_offscreen(width, height);
+  start_offscreen(width, height, external);
 }
 
 void end_offscreen() {
@@ -957,6 +1028,40 @@ bool create_pass(uint32_t width, uint32_t height) {
   begin_offscreen(width, height);
   return true;
 }
+
+// strikers-quest (from aurora-vr): see gfx.hpp.
+bool create_pass_external(const ExternalPassTarget& target) {
+  if (!target.texture || !target.view || target.width == 0 || target.height == 0) {
+    Log.warn("create_pass_external: invalid target ({}x{})", target.width, target.height);
+    return false;
+  }
+  if (target.format != color_format()) {
+    Log.warn("create_pass_external: target format {} != scene color format {}", static_cast<int>(target.format),
+             static_cast<int>(color_format()));
+    return false;
+  }
+
+  gx::fifo::drain();
+
+  if (!g_recorder.active() || g_recorder.currentRenderPass == UINT32_MAX) {
+    Log.warn("create_pass_external: called outside an active render pass");
+    return false;
+  }
+  if (g_recorder.inOffscreen) {
+    Log.warn("create_pass_external: an offscreen pass is already active (nesting is unsupported)");
+    return false;
+  }
+
+  begin_offscreen(target.width, target.height, &target);
+  return true;
+}
+
+namespace {
+bool s_offscreenUsesNativeLogicalSize = false;
+} // namespace
+
+void set_offscreen_uses_native_logical_size(bool enabled) noexcept { s_offscreenUsesNativeLogicalSize = enabled; }
+bool offscreen_uses_native_logical_size() noexcept { return s_offscreenUsesNativeLogicalSize; }
 
 bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out) {
   out = {};
@@ -1128,6 +1233,22 @@ Range push_storage(const uint8_t* data, size_t length) {
     return {};
   }
   return push(current_frame_packet().storage, data, length, resources().limits.minStorageBufferOffsetAlignment);
+}
+
+// strikers-quest: bytes used so far in this frame's fixed pools (vertex, uniform, index, storage),
+// so the headset's per-eye re-sends can stop short of an overflow, which aborts.
+extern "C" void aurora_gfx_pool_usage(uint32_t* usedBytes, size_t count) {
+  uint32_t used[4] = {0, 0, 0, 0};
+  if (g_recorder.active()) {
+    auto& frame = current_frame_packet();
+    used[0] = static_cast<uint32_t>(frame.verts.size());
+    used[1] = static_cast<uint32_t>(frame.uniforms.size());
+    used[2] = static_cast<uint32_t>(frame.indices.size());
+    used[3] = static_cast<uint32_t>(frame.storage.size());
+  }
+  for (size_t i = 0; i < count && i < 4; ++i) {
+    usedBytes[i] = used[i];
+  }
 }
 
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {

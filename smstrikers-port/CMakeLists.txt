@@ -237,6 +237,13 @@ file(GLOB_RECURSE PLATFORM_SOURCES CONFIGURE_DEPENDS
 list(REMOVE_ITEM PLATFORM_SOURCES
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/vulkan_shim.c")
 
+# strikers-quest: src/platform/xr_quest.cpp is built on its own (strikers_xr, below): C++17 and
+# without the port prelude, which the Vulkan and OpenXR headers do not survive.
+list(REMOVE_ITEM PLATFORM_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_quest.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_fx.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp")
+
 # src/platform/operator_new.cpp is the one file in the tree that is not C++11.
 list(REMOVE_ITEM PLATFORM_SOURCES
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/operator_new.cpp")
@@ -574,6 +581,20 @@ else()
     message(STATUS "Disc images: .iso/.gcm and .ciso; no zlib, so no .gcz")
 endif()
 
+# strikers-quest: zstd (decompression only, extern/zstd, copied from Dolphin's Externals) for .rvz
+# disc images, Dolphin's own compressed format (src/platform/disc.c). Built without the port prelude.
+file(GLOB PORT_ZSTD_SOURCES CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/extern/zstd/common/*.c"
+     "${CMAKE_CURRENT_SOURCE_DIR}/extern/zstd/decompress/*.c")
+add_library(port_zstd STATIC ${PORT_ZSTD_SOURCES})
+target_include_directories(port_zstd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/extern/zstd")
+target_compile_definitions(port_zstd PRIVATE ZSTD_DISABLE_ASM=1 ZSTD_LEGACY_SUPPORT=0)
+set_target_properties(port_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_definitions(strikers_platform PRIVATE STRIKERS_ZSTD=1)
+target_link_libraries(strikers_platform PRIVATE port_zstd)
+target_link_libraries(strikers PRIVATE port_zstd)
+message(STATUS "Disc images: also .rvz (zstd)")
+
 # Dead-strip the debug classes (StatsGatherer, cFuzzyDebugger) whose vtables reference methods
 # defined only in files the decomp excludes, and which nothing ever constructs.
 if(APPLE)
@@ -617,6 +638,47 @@ if(STRIKERS_AURORA)
 
     # Frame capture lives inside Aurora now (lib/aurora.cpp, namespace capture).
 
+    # strikers-quest: the Quest OpenXR layer (include/port/xr_quest.h). Elsewhere the same file
+    # compiles to stubs, so main.cpp links everywhere.
+    add_library(strikers_xr OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_quest.cpp"
+                                   "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_fx.cpp"
+                                   "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp")
+    set_target_properties(strikers_xr PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+    # Aurora's full usage requirements (includes incl. Dawn's, and TARGET_PC and the rest) and
+    # nothing of the port's: include/ here is NOT on the path, because include/dolphin/pad.h is the
+    # decomp's, and the PADStatus this file hands to PADSetVirtualStatus must be the one Aurora's PAD
+    # was built with. xr_quest.cpp reaches its own header by relative path.
+    # dawn::webgpu_dawn for webgpu_cpp.h: aurora::core links Dawn privately, so its headers do not
+    # come along. Usage requirements only; the library itself reaches libmain.so through Aurora.
+    target_link_libraries(strikers_xr PRIVATE aurora::core aurora::pad dawn::webgpu_dawn)
+    target_sources(strikers PRIVATE $<TARGET_OBJECTS:strikers_xr>)
+
+    if(ANDROID)
+        option(STRIKERS_XR "Build the Quest OpenXR layer" ON)
+    endif()
+    if(ANDROID AND STRIKERS_XR)
+        # The Khronos loader and headers, unpacked from org.khronos.openxr:openxr_loader_for_android
+        # into include/ and lib/<abi>/. STRIKERS_OPENXR_ROOT in the environment wins.
+        if(DEFINED ENV{STRIKERS_OPENXR_ROOT})
+            set(_xr_root "$ENV{STRIKERS_OPENXR_ROOT}")
+        else()
+            get_filename_component(_xr_root "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/openxr" ABSOLUTE)
+        endif()
+        if(NOT EXISTS "${_xr_root}/include/openxr/openxr.h" OR
+           NOT EXISTS "${_xr_root}/lib/${ANDROID_ABI}/libopenxr_loader.so")
+            message(FATAL_ERROR "STRIKERS_XR: no OpenXR headers/loader under ${_xr_root}")
+        endif()
+        add_library(strikers_openxr_loader SHARED IMPORTED)
+        set_target_properties(strikers_openxr_loader PROPERTIES
+            IMPORTED_LOCATION "${_xr_root}/lib/${ANDROID_ABI}/libopenxr_loader.so")
+        target_include_directories(strikers_xr PRIVATE "${_xr_root}/include")
+        target_compile_definitions(strikers_xr PRIVATE STRIKERS_XR=1)
+        # The system Vulkan loader, linked directly: the XR device's calls must not go through
+        # vulkan_shim.c, which is why the Quest build does not ship the shim at all.
+        target_link_libraries(strikers PRIVATE strikers_openxr_loader vulkan android log)
+        set(STRIKERS_OPENXR_LOADER "${_xr_root}/lib/${ANDROID_ABI}/libopenxr_loader.so" CACHE INTERNAL "")
+        message(STATUS "strikers: Quest OpenXR layer ON (${_xr_root})")
+    endif()
 endif()
 
 # Windows: what a runnable build needs that a linkable one does not.

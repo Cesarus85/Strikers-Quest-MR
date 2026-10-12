@@ -25,6 +25,9 @@ unsigned int PortVirtualTicker(void);
 // Returns 0 when STRIKERS_SEED is unset, leaving `out` untouched.
 int PortFixedSeed(unsigned int* out);
 
+// strikers-quest: the online match's fixed step (include/port/xr_net.h), switched at runtime.
+void PortNetSetFixedStep(int on);
+
 #ifdef __cplusplus
 }
 #endif

@@ -364,13 +364,23 @@ void write_texture(TextureRef& ref, ArrayRef<uint8_t> data) noexcept {
   }
 }
 
+// strikers-quest: on the headset the pitch is seen small and at a slant, where the game's own
+// filtering (set for a TV) shimmers; every mipmapped texture gets at least this much anisotropic
+// filtering (aurora_xr_set_texture_anisotropy, from src/platform/xr_quest.cpp, before any draw).
+static u16 g_xrMinAnisotropy = 1;
+} // namespace aurora::gfx
+extern "C" void aurora_xr_set_texture_anisotropy(unsigned int n) {
+  aurora::gfx::g_xrMinAnisotropy = static_cast<u16>(n < 1 ? 1 : (n > 16 ? 16 : n));
+}
+namespace aurora::gfx {
+
 wgpu::SamplerDescriptor TextureBind::get_descriptor() const noexcept {
   auto [minFilter, mipFilter] = wgpu_filter_mode(texObj.min_filter());
   auto [magFilter, _] = wgpu_filter_mode(texObj.mag_filter());
   const bool mipsEnabled = mipFilter != wgpu::MipmapFilterMode::Undefined;
   float minLod = texObj.min_lod();
   float maxLod = texObj.max_lod();
-  u16 maxAnisotropy = wgpu_aniso(texObj.max_aniso());
+  u16 maxAnisotropy = std::max(wgpu_aniso(texObj.max_aniso()), g_xrMinAnisotropy);
   if (ref && ref->isReplacement) {
     minLod = 0.f;
     maxLod = 1000.f;

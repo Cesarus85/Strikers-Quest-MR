@@ -1,4 +1,5 @@
 #include "Game/Drawable/DrawableModel.h"
+#include "port/xr_layers.h" // strikers-quest: Tabletop field vs stadium
 #include "Game/Debug/ShapeRender.h"
 #include "Game/Render/RenderShadow.h"
 #include "NL/gl/glMatrix.h"
@@ -506,6 +507,8 @@ void DrawableModel::DrawModel(const nlMatrix4& worldMatrix)
     if ((u32)(matHandle + 0x10000) != 0xFFFF)
     {
         glSetMatrix(matHandle, worldMatrix);
+        // strikers-quest: field or stadium, for the Tabletop layer (no-op outside headset 3D modes).
+        PortXrClassifyAndMark(this, matHandle);
     }
 
     if (m_uObjectCreationFlags & 0x00200000)

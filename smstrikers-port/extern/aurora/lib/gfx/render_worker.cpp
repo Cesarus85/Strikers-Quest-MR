@@ -1,6 +1,7 @@
 #include "render_worker.hpp"
 
 #include "../thread.hpp"
+#include "../xr_waits.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -46,6 +47,7 @@ void worker_main(std::stop_token token) {
 
     if (item->work) {
       ZoneScopedN("QueueItem work");
+      const xr_waits::Scope busy{xr_waits::RenderBusy};
       item->work();
     }
     complete_sync(item->sync);
@@ -88,7 +90,10 @@ BoundedQueue::BoundedQueue(size_t capacity) : m_capacity(capacity) {}
 bool BoundedQueue::push(QueueItem item) {
   ZoneScoped;
   std::unique_lock lock{m_mutex};
-  m_notFull.wait(lock, [&] { return m_closed || m_items.size() < m_capacity; });
+  if (!m_closed && m_items.size() >= m_capacity) {
+    const xr_waits::Scope waited{xr_waits::QueueFull};
+    m_notFull.wait(lock, [&] { return m_closed || m_items.size() < m_capacity; });
+  }
   if (m_closed) {
     return false;
   }
@@ -284,6 +289,7 @@ void synchronize() {
       .type = ItemType::Sync,
       .sync = sync,
   });
+  const xr_waits::Scope waited{xr_waits::Sync};
   std::unique_lock lock{sync->mutex};
   sync->cv.wait(lock, [&] { return sync->complete; });
 }

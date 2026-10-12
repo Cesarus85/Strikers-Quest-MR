@@ -6,9 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef STRIKERS_ZLIB
 #include <zlib.h>
+#endif
+
+#ifdef STRIKERS_ZSTD
+#include <zstd.h>  // strikers-quest: .rvz (extern/zstd)
 #endif
 
 #if defined(STRIKERS_ZLIB) || defined(PORT_DISC_INFLATE_HOOK)
@@ -36,6 +41,10 @@ static int disc_seek(FILE* f, unsigned long long off)
 #define DISC_RAW 0
 #define DISC_CISO 1
 #define DISC_GCZ 2
+#define DISC_RVZ 3
+
+struct Rvz;
+static void rvz_free(struct Rvz* r);
 
 // The disc header's own magic, big-endian at 0x1C, on every GameCube disc.
 #define GC_MAGIC 0xC2339F3Du
@@ -71,6 +80,9 @@ struct PortDisc
     unsigned* cacheAge;
     unsigned cacheSlots;
     unsigned cacheClock;
+
+    // RVZ: its tables, buffers and junk generator (below).
+    struct Rvz* rvz;
 };
 
 static uint32_t rd_be32(const unsigned char* p)
@@ -124,6 +136,7 @@ void port_disc_close(PortDisc* disc)
     free(disc->cacheBlock);
     free(disc->cacheLen);
     free(disc->cacheAge);
+    rvz_free(disc->rvz);
     free(disc);
 }
 
@@ -135,6 +148,12 @@ static PortDisc* fail(PortDisc* d, char* err, size_t errsize, const char* text)
 }
 
 static int gcz_load(PortDisc* d, unsigned block, unsigned char* out, unsigned* outLen);
+static int rvz_load(PortDisc* d, unsigned group, unsigned char* out, unsigned* outLen);
+
+static int block_load(PortDisc* d, unsigned block, unsigned char* out, unsigned* outLen)
+{
+    return d->kind == DISC_RVZ ? rvz_load(d, block, out, outLen) : gcz_load(d, block, out, outLen);
+}
 
 static const unsigned char* cache_get(PortDisc* d, unsigned block, unsigned* len)
 {
@@ -163,7 +182,7 @@ static const unsigned char* cache_get(PortDisc* d, unsigned block, unsigned* len
             return NULL;
     }
     d->cacheBlock[victim] = ~0u;
-    if (gcz_load(d, block, d->cache[victim], len) != 0)
+    if (block_load(d, block, d->cache[victim], len) != 0)
         return NULL;
     d->cacheBlock[victim] = block;
     d->cacheLen[victim] = *len;
@@ -341,6 +360,467 @@ static PortDisc* ciso_open(PortDisc* d, const unsigned char* head, char* err,
 }
 
 
+// ---------------------------------------------------------------------------------------------
+// RVZ (strikers-quest): Dolphin's compressed format, GameCube discs only. The disc's first 0x80
+// bytes sit in the file's header; the rest is "raw data" cut into groups of chunk_size bytes,
+// each zstd-compressed (or stored as is), and each "packed": runs of real bytes, and runs of the
+// junk the disc was padded with, kept only as the seed of the generator that made it. Layout and
+// generator after Dolphin (docs/WiaAndRvz.md, DiscIO/WIABlob.cpp, DiscIO/WIACompression.cpp,
+// DiscIO/LaggedFibonacciGenerator.cpp, the last one CC0). Because it follows Dolphin's code, this
+// RVZ section is under Dolphin's license, GPL-2.0-or-later (../../LICENSE-GPL-2.0.txt).
+// ---------------------------------------------------------------------------------------------
+
+#define RVZ_BLOCK 0x8000u
+#define LFG_K 521
+#define LFG_J 32
+#define LFG_SEED 17
+
+typedef struct
+{
+    uint64_t offset, size;  // on the disc
+    uint32_t group, groups; // its first group and how many
+} RvzRaw;
+
+typedef struct
+{
+    uint64_t fileOffset;
+    uint32_t size;          // as stored, 0 for a group of zeroes
+    uint32_t packed;        // size of the packed stream once decompressed, 0 when not packed
+    uint32_t outSize;       // bytes of disc it holds
+    unsigned char compressed;
+} RvzGroup;
+
+struct Rvz
+{
+    unsigned char discHeader[0x80];
+    uint64_t isoSize;
+    uint32_t chunkSize;
+    uint32_t compression;   // 0 none, 5 zstd
+    RvzRaw* raw;
+    unsigned rawCount;
+    RvzGroup* group;
+    unsigned groupCount;
+    unsigned char* comp;    // one group as stored
+    size_t compCap;
+    unsigned char* packed;  // one group's packed stream
+    size_t packedCap;
+#ifdef STRIKERS_ZSTD
+    ZSTD_DCtx* dctx;
+#endif
+    uint32_t lfg[LFG_K];
+    size_t lfgPos;
+};
+
+static void rvz_free(struct Rvz* r)
+{
+    if (r == NULL)
+        return;
+    free(r->raw);
+    free(r->group);
+    free(r->comp);
+    free(r->packed);
+#ifdef STRIKERS_ZSTD
+    if (r->dctx != NULL)
+        ZSTD_freeDCtx(r->dctx);
+#endif
+    free(r);
+}
+
+static uint64_t rd_be64(const unsigned char* p)
+{
+    return ((uint64_t)rd_be32(p) << 32) | rd_be32(p + 4);
+}
+
+static uint32_t bswap32u(uint32_t x)
+{
+    return (x >> 24) | ((x >> 8) & 0xFF00u) | ((x << 8) & 0xFF0000u) | (x << 24);
+}
+
+// The junk generator: a lagged Fibonacci generator, its output read as bytes of the word buffer
+// (little-endian hosts, as Dolphin's is).
+static void lfg_step(uint32_t* b)
+{
+    size_t i;
+    for (i = 0; i < LFG_J; i++)
+        b[i] ^= b[i + LFG_K - LFG_J];
+    for (i = LFG_J; i < LFG_K; i++)
+        b[i] ^= b[i - LFG_J];
+}
+
+static void lfg_seed(struct Rvz* r, const unsigned char* seed)
+{
+    uint32_t* b = r->lfg;
+    size_t i;
+    r->lfgPos = 0;
+    for (i = 0; i < LFG_SEED; i++)
+        b[i] = rd_be32(seed + i * 4);
+    for (i = LFG_SEED; i < LFG_K; i++)
+        b[i] = (b[i - 17] << 23) ^ (b[i - 16] >> 9) ^ b[i - 1];
+    for (i = 0; i < LFG_K; i++)
+        b[i] = bswap32u((b[i] & 0xFF00FFFFu) | ((b[i] >> 2) & 0x00FF0000u));
+    for (i = 0; i < 4; i++)
+        lfg_step(b);
+}
+
+static void lfg_skip(struct Rvz* r, size_t n)
+{
+    r->lfgPos += n;
+    while (r->lfgPos >= LFG_K * 4)
+    {
+        lfg_step(r->lfg);
+        r->lfgPos -= LFG_K * 4;
+    }
+}
+
+static void lfg_bytes(struct Rvz* r, unsigned char* out, size_t n)
+{
+    while (n > 0)
+    {
+        size_t len = LFG_K * 4 - r->lfgPos;
+        if (len > n)
+            len = n;
+        memcpy(out, (const unsigned char*)r->lfg + r->lfgPos, len);
+        r->lfgPos += len;
+        out += len;
+        n -= len;
+        if (r->lfgPos == LFG_K * 4)
+        {
+            lfg_step(r->lfg);
+            r->lfgPos = 0;
+        }
+    }
+}
+
+// Stored bytes into `out`: zstd-decompressed, or copied when stored as is. Bytes produced, or -1.
+static long rvz_unpack_bytes(struct Rvz* r, const unsigned char* in, size_t inLen, unsigned char* out,
+                             size_t outCap, int compressed)
+{
+    if (!compressed)
+    {
+        if (inLen > outCap)
+            inLen = outCap;
+        memcpy(out, in, inLen);
+        return (long)inLen;
+    }
+#ifdef STRIKERS_ZSTD
+    {
+        const size_t got = ZSTD_decompressDCtx(r->dctx, out, outCap, in, inLen);
+        return ZSTD_isError(got) ? -1 : (long)got;
+    }
+#else
+    (void)r;
+    return -1;
+#endif
+}
+
+static int rvz_grow(unsigned char** buf, size_t* cap, size_t want)
+{
+    unsigned char* p;
+    if (*cap >= want)
+        return 0;
+    p = (unsigned char*)realloc(*buf, want);
+    if (p == NULL)
+        return -1;
+    *buf = p;
+    *cap = want;
+    return 0;
+}
+
+static int rvz_load(PortDisc* d, unsigned g, unsigned char* out, unsigned* outLen)
+{
+    struct Rvz* r = d->rvz;
+    const RvzGroup* e;
+    const unsigned char* data;
+    size_t dataLen;
+
+    *outLen = 0;
+    if (r == NULL || g >= r->groupCount)
+        return -1;
+    e = &r->group[g];
+    if (e->size == 0)
+    {
+        memset(out, 0, e->outSize);
+        *outLen = e->outSize;
+        return 0;
+    }
+    if (rvz_grow(&r->comp, &r->compCap, e->size) != 0)
+        return -1;
+    if (disc_seek(d->f, e->fileOffset) != 0 || fread(r->comp, 1, e->size, d->f) != e->size)
+        return -1;
+    data = r->comp;
+    dataLen = e->size;
+
+    if (e->compressed)
+    {
+        unsigned char* dst = out;
+        size_t cap = e->outSize;
+        long got;
+        if (e->packed != 0)
+        {
+            if (rvz_grow(&r->packed, &r->packedCap, e->packed) != 0)
+                return -1;
+            dst = r->packed;
+            cap = e->packed;
+        }
+        got = rvz_unpack_bytes(r, r->comp, e->size, dst, cap, 1);
+        if (got < 0)
+            return -1;
+        data = dst;
+        dataLen = (size_t)got;
+    }
+
+    if (e->packed == 0)
+    {
+        // A plain group: the disc bytes themselves.
+        if (data != out)
+            memcpy(out, data, dataLen < e->outSize ? dataLen : e->outSize);
+        if (dataLen < e->outSize)
+            memset(out + dataLen, 0, e->outSize - dataLen);
+        *outLen = e->outSize;
+        return 0;
+    }
+
+    {
+        // Packed: a 32-bit big-endian size per run, top bit set for junk (then the generator's
+        // seed follows), clear for that many real bytes.
+        size_t pos = 0, written = 0;
+        while (written < e->outSize && pos + 4 <= dataLen)
+        {
+            const uint32_t size = rd_be32(data + pos);
+            size_t n = size & 0x7FFFFFFFu;
+            pos += 4;
+            if (n > e->outSize - written)
+                n = e->outSize - written;
+            if ((size & 0x80000000u) != 0)
+            {
+                if (pos + LFG_SEED * 4 > dataLen)
+                    return -1;
+                lfg_seed(r, data + pos);
+                pos += LFG_SEED * 4;
+                // Groups start on 0x8000 boundaries, so this is the disc offset's place in its block.
+                lfg_skip(r, written % RVZ_BLOCK);
+                lfg_bytes(r, out + written, n);
+            }
+            else
+            {
+                if (pos + n > dataLen)
+                    return -1;
+                memcpy(out + written, data + pos, n);
+                pos += n;
+            }
+            written += n;
+        }
+        if (written < e->outSize)
+            memset(out + written, 0, e->outSize - written);
+        *outLen = e->outSize;
+        return 0;
+    }
+}
+
+// One of the two tables (raw data entries, group entries): read and unpacked into `out`.
+static int rvz_table(PortDisc* d, uint64_t at, uint32_t storedSize, unsigned char* out, size_t outSize)
+{
+    struct Rvz* r = d->rvz;
+    unsigned char* in;
+    long got;
+    if (outSize == 0)
+        return 0;
+    in = (unsigned char*)malloc(storedSize ? storedSize : 1);
+    if (in == NULL)
+        return -1;
+    if (disc_seek(d->f, at) != 0 || fread(in, 1, storedSize, d->f) != storedSize)
+    {
+        free(in);
+        return -1;
+    }
+    got = rvz_unpack_bytes(r, in, storedSize, out, outSize, r->compression != 0);
+    free(in);
+    return got == (long)outSize ? 0 : -1;
+}
+
+static PortDisc* rvz_open(PortDisc* d, char* err, size_t errsize)
+{
+#ifndef STRIKERS_ZSTD
+    return fail(d, err, errsize,
+                "That is a .rvz disc image, and this build of the game was compiled without zstd,\n"
+                "so it cannot read one. Convert it to a plain .iso (Dolphin: Convert File Format).");
+#else
+    unsigned char h1[0x48];
+    unsigned char h2[0xDC];
+    uint32_t h2size, nRaw, rawSize, nGroups, groupSize;
+    uint64_t rawAt, groupAt;
+    unsigned char* table = NULL;
+    struct Rvz* r;
+    unsigned i, k;
+
+    memset(h2, 0, sizeof h2);
+    if (disc_seek(d->f, 0) != 0 || fread(h1, 1, sizeof h1, d->f) != sizeof h1)
+        return fail(d, err, errsize, "That .rvz file ends inside its header.");
+    h2size = rd_be32(h1 + 0x0C);
+    if (h2size < sizeof h2 - 7 || h2size > 0x10000)
+        return fail(d, err, errsize, "That .rvz file's header does not make sense; it may be damaged.");
+    if (fread(h2, 1, h2size < sizeof h2 ? h2size : sizeof h2, d->f) == 0)
+        return fail(d, err, errsize, "That .rvz file ends inside its header.");
+
+    r = (struct Rvz*)calloc(1, sizeof *r);
+    if (r == NULL)
+        return fail(d, err, errsize, "Out of memory.");
+    d->rvz = r;
+    d->kind = DISC_RVZ;
+    d->name = "RVZ";
+    r->isoSize = rd_be64(h1 + 0x24);
+    r->compression = rd_be32(h2 + 0x04);
+    r->chunkSize = rd_be32(h2 + 0x0C);
+    memcpy(r->discHeader, h2 + 0x10, sizeof r->discHeader);
+
+    if (rd_be32(h2 + 0x00) != 1 || rd_be32(h2 + 0x90) != 0)
+        return fail(d, err, errsize,
+                    "That .rvz holds a Wii disc. Super Mario Strikers is a GameCube game; its disc\n"
+                    "has a code beginning G4Q.");
+    if (r->compression != 0 && r->compression != 5)
+        return fail(d, err, errsize,
+                    "That .rvz was made with bzip2 or LZMA compression, and this reads Dolphin's\n"
+                    "default, zstd. Convert it again with zstd, or to a plain .iso.");
+    if (r->chunkSize < RVZ_BLOCK || r->chunkSize > (32u << 20) || r->chunkSize % RVZ_BLOCK != 0)
+        return fail(d, err, errsize, "That .rvz file's block size is not one this can read.");
+
+    r->dctx = ZSTD_createDCtx();
+    if (r->dctx == NULL)
+        return fail(d, err, errsize, "Out of memory.");
+
+    nRaw = rd_be32(h2 + 0xB4);
+    rawAt = rd_be64(h2 + 0xB8);
+    rawSize = rd_be32(h2 + 0xC0);
+    nGroups = rd_be32(h2 + 0xC4);
+    groupAt = rd_be64(h2 + 0xC8);
+    groupSize = rd_be32(h2 + 0xD0);
+    if (nRaw == 0 || nRaw > 4096 || nGroups == 0 || nGroups > (1u << 22))
+        return fail(d, err, errsize, "That .rvz file's tables do not make sense; it may be damaged.");
+
+    // The raw data entries: where on the disc each run of groups goes.
+    table = (unsigned char*)malloc((size_t)nRaw * 24);
+    r->raw = (RvzRaw*)calloc(nRaw, sizeof *r->raw);
+    if (table == NULL || r->raw == NULL || rvz_table(d, rawAt, rawSize, table, (size_t)nRaw * 24) != 0)
+    {
+        free(table);
+        return fail(d, err, errsize, "That .rvz file's tables could not be read; it may be damaged.");
+    }
+    r->rawCount = nRaw;
+    for (i = 0; i < nRaw; i++)
+    {
+        const unsigned char* p = table + (size_t)i * 24;
+        r->raw[i].offset = rd_be64(p);
+        r->raw[i].size = rd_be64(p + 8);
+        r->raw[i].group = rd_be32(p + 16);
+        r->raw[i].groups = rd_be32(p + 20);
+    }
+    free(table);
+
+    // The group entries: where each group sits in the file, and how it is stored.
+    table = (unsigned char*)malloc((size_t)nGroups * 12);
+    r->group = (RvzGroup*)calloc(nGroups, sizeof *r->group);
+    if (table == NULL || r->group == NULL
+        || rvz_table(d, groupAt, groupSize, table, (size_t)nGroups * 12) != 0)
+    {
+        free(table);
+        return fail(d, err, errsize, "That .rvz file's tables could not be read; it may be damaged.");
+    }
+    r->groupCount = nGroups;
+    for (i = 0; i < nGroups; i++)
+    {
+        const unsigned char* p = table + (size_t)i * 12;
+        const uint32_t size = rd_be32(p + 4);
+        r->group[i].fileOffset = (uint64_t)rd_be32(p) << 2;
+        r->group[i].size = size & 0x7FFFFFFFu;
+        r->group[i].compressed = (size & 0x80000000u) != 0 && r->compression != 0;
+        r->group[i].packed = rd_be32(p + 8);
+    }
+    free(table);
+
+    // How much disc each group holds: a whole chunk, less for a run's last one. A run starts on
+    // a 0x8000 boundary (the bytes before its first offset come along).
+    for (i = 0; i < nRaw; i++)
+    {
+        const uint64_t skipped = r->raw[i].offset % RVZ_BLOCK;
+        const uint64_t size = r->raw[i].size + skipped;
+        for (k = 0; k < r->raw[i].groups; k++)
+        {
+            const uint32_t g = r->raw[i].group + k;
+            const uint64_t at = (uint64_t)k * r->chunkSize;
+            if (g >= nGroups || at >= size)
+                break;
+            r->group[g].outSize = (uint32_t)(size - at < r->chunkSize ? size - at : r->chunkSize);
+        }
+    }
+
+    d->blockSize = r->chunkSize;
+    if (cache_init(d) != 0)
+        return fail(d, err, errsize, "Out of memory sizing the .rvz block cache.");
+    return d;
+#endif
+}
+
+static long rvz_read(PortDisc* d, unsigned char* out, size_t len, unsigned long long offset)
+{
+    const struct Rvz* r = d->rvz;
+    size_t done = 0;
+
+    while (done < len)
+    {
+        const unsigned long long abs = offset + done;
+        const RvzRaw* e = NULL;
+        unsigned i;
+        if (abs >= r->isoSize)
+            break;
+        if (abs < sizeof r->discHeader)
+        {
+            size_t n = sizeof r->discHeader - (size_t)abs;
+            if (n > len - done)
+                n = len - done;
+            memcpy(out + done, r->discHeader + abs, n);
+            done += n;
+            continue;
+        }
+        for (i = 0; i < r->rawCount; i++)
+            if (abs >= r->raw[i].offset && abs < r->raw[i].offset + r->raw[i].size)
+            {
+                e = &r->raw[i];
+                break;
+            }
+        if (e == NULL)
+        {
+            // Not stored anywhere: nothing the game reads.
+            memset(out + done, 0, 1);
+            done += 1;
+            continue;
+        }
+        {
+            const uint64_t start = e->offset - e->offset % RVZ_BLOCK;
+            const unsigned k = (unsigned)((abs - start) / r->chunkSize);
+            const unsigned within = (unsigned)((abs - start) % r->chunkSize);
+            const uint64_t entryEnd = e->offset + e->size;
+            unsigned have = 0;
+            const unsigned char* p;
+            size_t want;
+            if (k >= e->groups)
+                break;
+            p = cache_get(d, e->group + k, &have);
+            if (p == NULL)
+                return done > 0 ? (long)done : -1;
+            if (within >= have)
+                break;
+            want = have - within;
+            if (want > len - done)
+                want = len - done;
+            if (abs + want > entryEnd)
+                want = (size_t)(entryEnd - abs);
+            memcpy(out + done, p + within, want);
+            done += want;
+        }
+    }
+    return (long)done;
+}
+
 long port_disc_read(PortDisc* d, void* dst, size_t len, unsigned long long offset)
 {
     unsigned char* out = (unsigned char*)dst;
@@ -348,6 +828,9 @@ long port_disc_read(PortDisc* d, void* dst, size_t len, unsigned long long offse
 
     if (d == NULL || dst == NULL)
         return -1;
+
+    if (d->kind == DISC_RVZ)
+        return rvz_read(d, out, len, offset);
 
     if (d->kind == DISC_RAW)
     {
@@ -406,6 +889,97 @@ long port_disc_read(PortDisc* d, void* dst, size_t len, unsigned long long offse
     return (long)done;
 }
 
+void port_disc_selftest(const char* path)
+{
+    char err[2048];
+    unsigned char h[0x440];
+    unsigned char* fst = NULL;
+    unsigned char* buf = NULL;
+    PortDisc* d = port_disc_open(path, err, sizeof err);
+    uint32_t dolOff, fstOff, fstSize, count, i;
+    unsigned long long bytes = 0;
+    unsigned files = 0, failures = 0;
+    uint32_t hash = 2166136261u;
+    clock_t t0 = clock();
+
+    if (d == NULL)
+    {
+        fprintf(stderr, "[port] disc selftest: %s: %s\n", path, err);
+        return;
+    }
+    if (port_disc_read(d, h, sizeof h, 0) != (long)sizeof h)
+    {
+        fprintf(stderr, "[port] disc selftest: cannot read the disc header\n");
+        port_disc_close(d);
+        return;
+    }
+    dolOff = rd_be32(h + 0x420);
+    fstOff = rd_be32(h + 0x424);
+    fstSize = rd_be32(h + 0x428);
+    fprintf(stderr, "[port] disc selftest: %s, %.6s \"%.40s\", dol at %08x, fst at %08x (%u bytes)\n",
+            port_disc_format(d), (const char*)h, (const char*)h + 0x20, dolOff, fstOff, fstSize);
+    {
+        unsigned char dol[0x100];
+        if (port_disc_read(d, dol, sizeof dol, dolOff) == (long)sizeof dol)
+        {
+            const uint32_t textAddr = rd_be32(dol + 0x48);
+            fprintf(stderr, "[port] disc selftest: dol text0 at %08x (%s)\n", textAddr,
+                    textAddr >= 0x80000000u && textAddr < 0x81800000u ? "sane" : "NOT SANE");
+        }
+    }
+    if (fstSize < 12 || fstSize > (16u << 20) || (fst = (unsigned char*)malloc(fstSize)) == NULL
+        || (buf = (unsigned char*)malloc(1u << 20)) == NULL
+        || port_disc_read(d, fst, fstSize, fstOff) != (long)fstSize)
+    {
+        fprintf(stderr, "[port] disc selftest: cannot read the file table\n");
+        free(fst);
+        free(buf);
+        port_disc_close(d);
+        return;
+    }
+    count = rd_be32(fst + 8);
+    for (i = 1; i < count && (unsigned long long)i * 12 + 12 <= fstSize; i++)
+    {
+        const unsigned char* e = fst + (size_t)i * 12;
+        uint32_t off, len, done = 0;
+        if (e[0] != 0)
+            continue;  // a directory
+        off = rd_be32(e + 4);
+        len = rd_be32(e + 8);
+        while (done < len)
+        {
+            const uint32_t want = len - done < (1u << 20) ? len - done : (1u << 20);
+            const long got = port_disc_read(d, buf, want, (unsigned long long)off + done);
+            uint32_t k;
+            if (got != (long)want)
+            {
+                ++failures;
+                break;
+            }
+            for (k = 0; k < want; k += 4096)
+            {
+                hash ^= buf[k];
+                hash *= 16777619u;
+            }
+            done += want;
+        }
+        if (files < 4 && len >= 4)
+        {
+            unsigned char m[4];
+            if (port_disc_read(d, m, 4, off) == 4)
+                fprintf(stderr, "[port] disc selftest: file %u at %08x, %u bytes, starts %02x%02x%02x%02x\n",
+                        i, off, len, m[0], m[1], m[2], m[3]);
+        }
+        ++files;
+        bytes += len;
+    }
+    fprintf(stderr, "[port] disc selftest: %u files, %llu bytes, %u failed, sample hash %08x, %.1f s\n", files,
+            bytes, failures, hash, (double)(clock() - t0) / CLOCKS_PER_SEC);
+    free(fst);
+    free(buf);
+    port_disc_close(d);
+}
+
 // NKit is *not* a refusal, and working out why cost a wrong one first.
 static void note_nkit(const unsigned char* head, size_t got)
 {
@@ -446,21 +1020,29 @@ PortDisc* port_disc_open(const char* path, char* err, size_t errsize)
         return fail(d, err, errsize,
                     "That file is too small to be a disc image.");
 
-    // The formats that are recognisable and cannot be read.
-    if (memcmp(head, "RVZ\x01", 4) == 0 || memcmp(head, "WIA\x01", 4) == 0)
+    // strikers-quest: Dolphin's .rvz (zstd), read as it is.
+    if (memcmp(head, "RVZ\x01", 4) == 0)
     {
-        char msg[1024];
-        snprintf(msg, sizeof msg,
-                 "That is a .%s disc image, which this port cannot read.\n\n"
-                 "RVZ and WIA store the disc re-encoded, zstd, LZMA and bzip2 "
-                 "blocks, with the\nlayout rebuilt around the partitions; "
-                 "which is a much larger reader than the\nthree formats here "
-                 "put together.\n\nConvert it to a plain .iso first. In "
-                 "Dolphin: right-click the game, Convert File\nFormat..., and "
-                 "set Format to ISO.",
-                 head[0] == 'R' ? "rvz" : "wia");
-        return fail(d, err, errsize, msg);
+        d = rvz_open(d, err, errsize);
+        if (d == NULL)
+            return NULL;
+        if (port_disc_read(d, head, sizeof head, 0) < 0x204)
+            return fail(d, err, errsize,
+                        "That .rvz could not be read past its own header, it is "
+                        "truncated or damaged.");
+        if (rd_be32(head + 0x1C) != GC_MAGIC)
+            return fail(d, err, errsize,
+                        "That .rvz decompresses to something that is not a GameCube "
+                        "disc. It is either damaged or an image of something else.");
+        return d;
     }
+
+    // The format that is recognisable and cannot be read.
+    if (memcmp(head, "WIA\x01", 4) == 0)
+        return fail(d, err, errsize,
+                    "That is a .wia disc image, which this port cannot read.\n\n"
+                    "Convert it to a plain .iso first. In Dolphin: right-click the "
+                    "game, Convert File\nFormat..., and set Format to ISO.");
 
     if (rd_be32(head + 0x1C) == GC_MAGIC)
     {

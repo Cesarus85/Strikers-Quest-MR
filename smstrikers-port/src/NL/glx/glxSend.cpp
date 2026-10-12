@@ -2,6 +2,7 @@
 #include "port/texfilter.h"
 #include "port/aspect.h"
 #include "port/probeobj.h"
+#include "port/xr_layers.h" // strikers-quest: Tabletop leaves the stands out
 #include "dolphin/os.h"
 #include "port/endian.h"
 #include <stdlib.h>
@@ -2927,7 +2928,12 @@ void glx_SendFrame_cb(eGLView view, unsigned long flags, const glModelPacket* p)
 
     if (flags & 0x800)
     {
-        glx_DrawPacket(p);
+        // strikers-quest: the Tabletop layer leaves the stands out (include/port/xr_layers.h). Only
+        // the draw is skipped; the state changes above still apply, so the packets after it are right.
+        if (p == NULL || !PortXrSkipPacketDraw(p->state.matrix))
+        {
+            glx_DrawPacket(p);
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 #include "Game/RumbleActions.h"
+#include "port/xr_quest.h"
 
 static struct RumbleActionState rumbleActionState[4];
 
@@ -147,6 +148,7 @@ void BeginRumbleAction(eRumbleActionPreset preset, cGlobalPad* pad)
         rumbleActionState[idx].pending = 0;
         rumbleActionState[idx].current = 0;
         rumbleActionState[idx].ops = ops;
+        PortXrRumblePreset(idx, preset); // strikers-quest: how hard the Touch controllers buzz
     }
 }
 

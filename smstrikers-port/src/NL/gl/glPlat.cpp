@@ -27,6 +27,10 @@
 #include "dolphin/os/OSReset.h"
 #include "dolphin/vm/VM.h"
 #include "Game/Sys/debug.h"
+#include "NL/gl/glMatrix.h" // strikers-quest: glAllocMatrix/glSetMatrix for the eye re-send
+#include "NL/gl/glView.h"
+#include "port/xr_layers.h"
+#include <string.h>
 
 // PAL 480i deflicker render mode (first symbol in .data)
 static GXRenderModeObj glPal480IntDf = { VI_TVMODE_PAL_INT,
@@ -89,6 +93,139 @@ static u32 fogtype[5] = { GX_FOG_PERSP_LIN, GX_FOG_PERSP_EXP, GX_FOG_PERSP_EXP2,
 static const GXColor glx_CopyClearColour = { 0, 0, 0, 0x40 };
 
 static void glx_SendViews();
+
+// strikers-quest: the headset's per-eye re-send (src/platform/xr_quest.cpp). After the normal send
+// every packet the game attached this frame is still in the render lists, so each eye sends them
+// again with the head's view and projection on the 3D world views. Views that are 2D, screen-space
+// or that grab the frame buffer are skipped: their results from the normal send stand (the shadow
+// textures, for one, are what the eye passes project).
+extern "C" int  PortXrStereoFrameBegin(void);
+extern "C" int  PortXrStereoEyeLayer(int eye, int layer, float view[16], float proj[16], int* flags);
+extern "C" void PortXrStereoEyeEnd(int eye);
+extern "C" void PortXrStereoFrameEnd(void);
+extern "C" int  PortXrHudOnlyNormalView(void);
+extern "C" int  PortXrEyeViewAllowed(int view, int tableLayer);
+// Aurora (dolphin/gx/GXAurora.h): marks draws Aurora may decode once per frame and reuse per send.
+extern "C" void GXAuroraSetDecodeScope(unsigned char on);
+
+enum
+{
+    XR_LAYER_SKIP_ACTORS = 1, // players, ball effects, particles: the life-size stadium around you
+    XR_LAYER_SKIP_SKY = 2,    // the skybox: the tabletop field in your real room
+    XR_LAYER_TABLE = 4,       // the Tabletop field: stadium objects are left out (port/xr_layers.h)
+};
+
+static bool s_xrEyeSend = false;
+static int s_xrEyeFlags = 0;
+
+static bool glx_XrEyeView(s32 view)
+{
+    // self-test tuning (xr_tune file): leave this view out of this layer
+    if (!PortXrEyeViewAllowed(view, (s_xrEyeFlags & XR_LAYER_TABLE) != 0 ? 1 : 0))
+        return false;
+    switch (view)
+    {
+    case GLV_Skybox:
+        return (s_xrEyeFlags & XR_LAYER_SKIP_SKY) == 0;
+    case GLV_Shadowed:
+    case GLV_WorldShadowed:
+    case GLV_Unshadowed:
+    case GLV_CoPlanar0:
+    case GLV_CoPlanar:
+    case GLV_InvisiblePlane:
+    case GLV_ElectricFence:
+        return true;
+    case GLV_Characters:
+    case GLV_UnsortedPerspective:
+    case GLV_LingeringParticles:
+    case GLV_Particles:
+        return (s_xrEyeFlags & XR_LAYER_SKIP_ACTORS) == 0;
+    default:
+        return false;
+    }
+}
+
+static const eGLView kXrEyeViews[] = {
+    GLV_Skybox, GLV_Shadowed, GLV_WorldShadowed, GLV_Unshadowed, GLV_Characters, GLV_CoPlanar0,
+    GLV_CoPlanar, GLV_UnsortedPerspective, GLV_LingeringParticles, GLV_Particles, GLV_InvisiblePlane,
+    GLV_ElectricFence,
+};
+enum { kXrEyeViewCount = sizeof(kXrEyeViews) / sizeof(kXrEyeViews[0]) };
+
+static void glx_XrSetEyeMatrices(const nlMatrix4& view, const nlMatrix4& proj)
+{
+    uintptr_t hView = glAllocMatrix();
+    uintptr_t hProj = glAllocMatrix();
+    if (hView == 0xFFFFFFFF || hProj == 0xFFFFFFFF)
+        return;
+    glSetMatrix(hView, view);
+    glSetMatrix(hProj, proj);
+    for (int i = 0; i < kXrEyeViewCount; i++)
+    {
+        glViewSetViewMatrix(kXrEyeViews[i], hView);
+        glViewSetProjectionMatrix(kXrEyeViews[i], hProj);
+    }
+}
+
+static void glx_XrSendEyes()
+{
+    const int layers = PortXrStereoFrameBegin();
+    if (layers <= 0)
+        return;
+
+    nlMatrix4 savedView[kXrEyeViewCount];
+    nlMatrix4 savedProj[kXrEyeViewCount];
+    for (int i = 0; i < kXrEyeViewCount; i++)
+    {
+        glViewGetViewMatrix(kXrEyeViews[i], savedView[i]);
+        glViewGetProjectionMatrix(kXrEyeViews[i], savedProj[i]);
+    }
+
+    for (int eye = 0; eye < 2; eye++)
+    {
+        for (int layer = 0; layer < layers; layer++)
+        {
+            float view[16];
+            float proj[16];
+            int flags = 0;
+            if (!PortXrStereoEyeLayer(eye, layer, view, proj, &flags))
+                continue;
+            nlMatrix4 v;
+            nlMatrix4 p;
+            memcpy(&v, view, sizeof(v));
+            memcpy(&p, proj, sizeof(p));
+            glx_XrSetEyeMatrices(v, p);
+
+            s_xrEyeFlags = flags;
+            s_xrEyeSend = true;
+            PortXrSetTableLayer((flags & XR_LAYER_TABLE) != 0);
+            PortXrSetEyeSend(true);
+            // Over passthrough the eye image's alpha must be real coverage: xr_quest.cpp turns on
+            // Aurora's coverage mode for the Living Room eye passes (gx.hpp g_xrCoverage). r4-r15
+            // set GXSetDstAlpha here, which the game's own state changes overrode, and the field
+            // came out see-through.
+            glx_SendViews();
+            PortXrSetTableLayer(false);
+            PortXrSetEyeSend(false);
+            s_xrEyeSend = false;
+        }
+        PortXrStereoEyeEnd(eye);
+    }
+
+    // Put the game camera back, for anything after the send that reads the view matrices.
+    for (int i = 0; i < kXrEyeViewCount; i++)
+    {
+        uintptr_t hView = glAllocMatrix();
+        uintptr_t hProj = glAllocMatrix();
+        if (hView == 0xFFFFFFFF || hProj == 0xFFFFFFFF)
+            break;
+        glSetMatrix(hView, savedView[i]);
+        glSetMatrix(hProj, savedProj[i]);
+        glViewSetViewMatrix(kXrEyeViews[i], hView);
+        glViewSetProjectionMatrix(kXrEyeViews[i], hProj);
+    }
+    PortXrStereoFrameEnd();
+}
 
 // No-fog colour passed via a void helper so the by-value arg copy is an
 // inline-expansion temporary that grabs the lowest stack slot (0x18),
@@ -262,6 +399,8 @@ void glplatSendFrame()
     glxSwapPre(true);
     glx_SendFrame(true);
     glx_SendViews();
+    glx_XrSendEyes(); // strikers-quest: no-op unless a headset 3D mode is on
+    PortXrLayersEndFrame();
     glxSwapPost(true);
     glplatFrameAllocNextFrame();
     glx_NumVirtMisses = 0U;
@@ -331,23 +470,57 @@ static void glx_SendViews()
     glx_SendReset();
 
     renderList = gl_ViewGetRenderList((eGLView)9);
-    if (!renderList->IsEmpty())
+    if (!s_xrEyeSend && !renderList->IsEmpty())
     {
         glx_UpdateWarble();
     }
 
-    if (glx_ViewFence < 0)
+    if (!s_xrEyeSend && glx_ViewFence < 0)
     {
         glx_StartMetrics();
     }
 
     dofRange = glConstantGet("dof/range");
 
+    const bool xrHudOnly = !s_xrEyeSend && PortXrHudOnlyNormalView() != 0; // strikers-quest
+
     for (view = 0; view < 0x22; view++)
     {
         if (!glViewGetEnable((eGLView)view))
         {
             continue;
+        }
+        // strikers-quest: an eye re-send draws the 3D world views only (see glx_XrEyeView).
+        if (s_xrEyeSend && !glx_XrEyeView(view))
+        {
+            continue;
+        }
+        // strikers-quest: in the headset 3D modes the game's culling is off, so each 3D world view
+        // leaves out the stadium objects its own camera cannot see (port/xr_layers.h).
+        if (PortXrLayersActive())
+        {
+            bool world3d = false;
+            for (int i = 0; i < kXrEyeViewCount; i++)
+                world3d = world3d || kXrEyeViews[i] == (eGLView)view;
+            // Tabletop during live play: the normal view only feeds the small scoreboard, so it
+            // draws the HUD (score, clock, items) and not the 3D world the eyes already show; the
+            // whole broadcast view comes back for cutscenes, replays and menus.
+            if (world3d && !s_xrEyeSend && xrHudOnly)
+            {
+                continue;
+            }
+            if (world3d)
+            {
+                nlMatrix4 cullView;
+                nlMatrix4 cullProj;
+                glViewGetViewMatrix((eGLView)view, cullView);
+                glViewGetProjectionMatrix((eGLView)view, cullProj);
+                PortXrSetCullCamera(&cullView.e2[0][0], &cullProj.e2[0][0]);
+            }
+            else
+            {
+                PortXrSetCullCamera(NULL, NULL);
+            }
         }
 
         renderList = gl_ViewGetRenderList((eGLView)view);
@@ -458,7 +631,18 @@ static void glx_SendViews()
             glx_ClearZBuffer();
         }
 
+        // strikers-quest: the players' vertices are decoded to floats once per frame and reused by
+        // every send (Aurora vertex_decode.hpp, r38): the marker rides in the FIFO with their draws.
+        const bool decodeScope = view == GLV_Characters;
+        if (decodeScope)
+        {
+            GXAuroraSetDecodeScope(1);
+        }
         gl_ViewIterate((eGLView)view, glx_SendFrame_cb);
+        if (decodeScope)
+        {
+            GXAuroraSetDecodeScope(0);
+        }
 
         if (view == 0)
         {
@@ -486,7 +670,7 @@ static void glx_SendViews()
     }
 
     glx_SendEnd();
-    if (glx_ViewFence < 0)
+    if (!s_xrEyeSend && glx_ViewFence < 0)
     {
         glx_StopMetrics();
     }

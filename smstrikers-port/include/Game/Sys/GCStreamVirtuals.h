@@ -20,7 +20,8 @@ inline void GCAudioStreaming::StereoAudioStream::_AsyncCancelCB(
     else
     {
         READ_CB_INFO* pCBInfo = (READ_CB_INFO*)uParam;
-        READ_CB_INFO::s_AllocPool.DeleteEntry(pCBInfo);
+        if (pCBInfo != NULL)  // strikers-quest r39: reads queued with no record (pool ran dry)
+            READ_CB_INFO::s_AllocPool.DeleteEntry(pCBInfo);
     }
 }
 
@@ -52,7 +53,8 @@ inline void GCAudioStreaming::MonoAudioStream::_AsyncCancelCB(
     void (*)(nlFile*, void*, unsigned int, uintptr_t))
 {
     READ_CB_INFO* pCBInfo = (READ_CB_INFO*)uParam;
-    READ_CB_INFO::s_AllocPool.DeleteEntry(pCBInfo);
+    if (pCBInfo != NULL)  // strikers-quest r39: reads queued with no record (pool ran dry)
+        READ_CB_INFO::s_AllocPool.DeleteEntry(pCBInfo);
 }
 
 inline unsigned long GCAudioStreaming::MonoAudioStream::GetUpdateReadLength()

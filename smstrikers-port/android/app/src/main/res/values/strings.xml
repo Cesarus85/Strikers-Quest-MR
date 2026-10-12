@@ -7,7 +7,7 @@
   values-pt-rBR/ with the rest.
 -->
 <resources>
-    <string name="app_name" translatable="false">Super Mario Strikers</string>
+    <string name="app_name" translatable="false">Quest 3 Strikers</string>
     <string name="app_subtitle">Native Android port</string>
 
     <!-- The launcher -->

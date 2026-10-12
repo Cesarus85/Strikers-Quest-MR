@@ -83,6 +83,10 @@ void GCAudioStreaming::AudioStream::_HdrReadCB(nlFile* pFile, void* pData, unsig
     }
 
     READ_CB_INFO* pCBInfo = (READ_CB_INFO*)User;
+    // strikers-quest r39: a read queued after the 32-record pool ran dry carries no record (seen
+    // after a long online freeze, when audio kept refilling with no game frame to complete reads).
+    if (pCBInfo == NULL)
+        return;
 
     bool serious;
     if (pCBInfo->pStream->m_Flags & (1 << SF_SeriousStop))
@@ -143,6 +147,8 @@ void GCAudioStreaming::AudioStream::_HdrReadCB(nlFile* pFile, void* pData, unsig
 void GCAudioStreaming::AudioStream::_WarmReadCB(nlFile* pFile, void* pData, unsigned int Length, uintptr_t User)
 {
     READ_CB_INFO* pCBInfo = (READ_CB_INFO*)User;
+    if (pCBInfo == NULL)  // strikers-quest r39: see _HdrReadCB
+        return;
     AudioStream* pStream = pCBInfo->pStream;
 
     bool serious;
@@ -197,6 +203,8 @@ inline void GCAudioStreaming::AudioStreamBuffer::Update(
 void GCAudioStreaming::AudioStream::_UpdateReadCB(nlFile* pFile, void* pData, unsigned int Length, uintptr_t User)
 {
     READ_CB_INFO* pCBInfo = (READ_CB_INFO*)User;
+    if (pCBInfo == NULL)  // strikers-quest r39: see _HdrReadCB (the friend's crash, 2026-10-11)
+        return;
     AudioStream* pStream = pCBInfo->pStream;
 
     bool serious;

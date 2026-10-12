@@ -96,6 +96,12 @@ extern "C" {
  */
 #define GX_AURORA_DRAW_INDEXED 0x0041
 
+/**
+ * strikers-quest: marks the draws that follow as worth decoding once per frame into plain floats
+ * (aurora_xr_set_vertex_decode mode 1). Must be followed by a u8: 1 = begin, 0 = end.
+ */
+#define GX_AURORA_DECODE_SCOPE 0x0042
+
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
 
@@ -172,6 +178,35 @@ void GXCreateFrameBuffer(u32 width, u32 height);
  * Must be called after GXCreateFrameBuffer() to resume normal rendering.
  */
 void GXRestoreFrameBuffer(void);
+
+/**
+ * strikers-quest: begin (1) or end (0) a run of draws that Aurora may decode once per frame and
+ * reuse across sends (GX_AURORA_DECODE_SCOPE). In-band, so it applies exactly to the draws between.
+ */
+void GXAuroraSetDecodeScope(u8 on);
+
+/**
+ * strikers-quest: 0 = off, 1 = draws inside a decode scope, 2 = every eligible draw. Read by the
+ * FIFO thread at each draw. Draws are decoded to floats on the CPU once per game frame (content
+ * keyed) and read by a vertex-shader variant whose attribute loads are plain vec4 loads.
+ */
+void aurora_xr_set_vertex_decode(int mode);
+
+/**
+ * strikers-quest: counters since the last call: [0] draws decoded (cache misses), [1] draws reused
+ * (cache hits), [2] vertices decoded, [3] draws that fell back (pipeline not ready yet), [4] draws
+ * not eligible, [5] decode CPU time in microseconds.
+ */
+void aurora_xr_take_decode_stats(u32 out[6]);
+
+/**
+ * strikers-quest: decoded bytes pushed into the vertex pool so far (monotonic), so the headset's
+ * pool guard can count them once per frame rather than once per send.
+ */
+unsigned long long aurora_xr_decoded_bytes(void);
+
+/** strikers-quest: decoded bytes the last completed frame pushed into the vertex pool. */
+unsigned long long aurora_xr_decoded_bytes_last_frame(void);
 
 #if __cplusplus
 }

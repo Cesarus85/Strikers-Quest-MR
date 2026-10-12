@@ -1,4 +1,5 @@
 #include "port/region.h"  // PORT: one binary, three discs
+#include "port/xr_net.h"  // strikers-quest: online 1v1
 #include "Game/SH/SHLoading.h"
 #include "Game/Audio/AudioLoader.h"
 #include "Game/Audio/AudioStream.h"
@@ -175,6 +176,9 @@ void SuperLoadingScene::Update(float fDeltaT)
     {
         if (mType == TT_IN)
         {
+            // strikers-quest: an online Friendly waits here for the friend (include/port/xr_net.h).
+            if (PortNetGameHoldMatchStart())
+                return;
             AudioLoader::StopStreaming();
             Audio::ConfigureStreamBuffers(2);
             AudioLoader::PlayLoadLoopMusic();

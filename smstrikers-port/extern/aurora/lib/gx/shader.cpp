@@ -6,6 +6,7 @@
 #include "gx.hpp"
 #include "gx_fmt.hpp"
 #include "shader_info.hpp"
+#include "vertex_decode.hpp"
 
 #include <dolphin/gx/GXEnum.h>
 
@@ -687,10 +688,128 @@ auto attr_address(const AttrConfig& mapping, GXAttr attr, std::string_view vidx,
   return {fmt::format("imm.vtx_start + {} * {}u + {}u", vidx, vtxStride, dlOffset + within), "vbuf"sv, false};
 }
 
+// The vertex-pool binding. Pulling shaders keep the exact original text (so their Dawn blob-cache
+// entries stay valid); decoded shaders view the pool as vec4s and get the decoded-only helpers.
+constexpr std::string_view PulledVertexBinding = "@group(0) @binding(0)\nvar<storage, read> vbuf: array<u32>;";
+constexpr std::string_view DecodedVertexBinding = R"""(@group(0) @binding(0)
+var<storage, read> vbuf4: array<vec4u>;
+
+fn load_dv(i: u32) -> vec4u {
+  // Guarded like load_word: Adreno drivers have mis-optimised unguarded storage loads.
+  if (i < arrayLength(&vbuf4)) {
+    return vbuf4[i];
+  }
+  return vec4u(0u);
+}
+
+// fetch_rgb565 ... fetch_rgba8 on a word holding the colour's bytes in memory order.
+fn clr_w_rgb565(w: u32, le: bool) -> vec4f {
+  let v = bswap16(w & 0xFFFFu, le);
+  return vec4f(
+    f32((v >> 11u) & 0x1Fu) / f32(0x1Fu),
+    f32((v >>  5u) & 0x3Fu) / f32(0x3Fu),
+    f32((v >>  0u) & 0x1Fu) / f32(0x1Fu),
+    1.0,
+  );
+}
+
+fn clr_w_rgb8(w: u32) -> vec4f {
+  let v = vec3u(extractBits(w, 0u, 8u), extractBits(w, 8u, 8u), extractBits(w, 16u, 8u));
+  return vec4f(f32(v.x), f32(v.y), f32(v.z), 255.0) / 255.0;
+}
+
+fn clr_w_rgbx8(w: u32) -> vec4f {
+  let v = vec4u(extractBits(w, 0u, 8u), extractBits(w, 8u, 8u), extractBits(w, 16u, 8u), extractBits(w, 24u, 8u));
+  return vec4f(f32(v.x), f32(v.y), f32(v.z), 255.0) / 255.0;
+}
+
+fn clr_w_rgba4(w: u32, le: bool) -> vec4f {
+  let v = bswap16(w & 0xFFFFu, le);
+  return vec4f(
+    f32((v >> 12u) & 0x0Fu) / f32(0x0Fu),
+    f32((v >>  8u) & 0x0Fu) / f32(0x0Fu),
+    f32((v >>  4u) & 0x0Fu) / f32(0x0Fu),
+    f32((v >>  0u) & 0x0Fu) / f32(0x0Fu),
+  );
+}
+
+fn clr_w_rgba6(w: u32, le: bool) -> vec4f {
+  let raw = w & 0x00FFFFFFu;
+  let v = select(((raw & 0x0000FFu) << 16u) | (raw & 0x00FF00u) | ((raw & 0xFF0000u) >> 16u), raw, le);
+  return vec4f(
+    f32((v >> 18u) & 0x3Fu) / f32(0x3Fu),
+    f32((v >> 12u) & 0x3Fu) / f32(0x3Fu),
+    f32((v >>  6u) & 0x3Fu) / f32(0x3Fu),
+    f32((v >>  0u) & 0x3Fu) / f32(0x3Fu),
+  );
+}
+
+fn clr_w_rgba8(w: u32) -> vec4f {
+  let v = vec4u(extractBits(w, 0u, 8u), extractBits(w, 8u, 8u), extractBits(w, 16u, 8u), extractBits(w, 24u, 8u));
+  return vec4f(v) / 255.0;
+})""";
+
+// strikers-quest: word w of the current vertex's decoded data (the dvN slots loaded in vs_main).
+std::string decoded_word(u32 w) { return fmt::format("dv{}.{}", w / 4, "xyzw"[w % 4]); }
+
+// strikers-quest: the decoded counterpart of attr_load: same WGSL type and value, read from the
+// words vertex_decode::decode wrote (positions, normals and UVs already as f32 bits, colours raw).
+auto decoded_attr_load(const ShaderConfig& config, GXAttr attr) -> std::string {
+  const auto layout = vertex_decode::layout_for(config);
+  const auto& slot = layout.attrs[attr];
+  const auto& mapping = config.attrs[attr];
+  const u32 w = slot.word;
+  switch (attr) {
+  case GX_VA_PNMTXIDX:
+  case GX_VA_TEX0MTXIDX:
+  case GX_VA_TEX1MTXIDX:
+  case GX_VA_TEX2MTXIDX:
+  case GX_VA_TEX3MTXIDX:
+  case GX_VA_TEX4MTXIDX:
+  case GX_VA_TEX5MTXIDX:
+  case GX_VA_TEX6MTXIDX:
+  case GX_VA_TEX7MTXIDX:
+    return decoded_word(w);
+  case GX_VA_POS:
+  case GX_VA_NRM:
+    return fmt::format("bitcast<vec3f>(vec3u({}, {}, {}))", decoded_word(w), decoded_word(w + 1),
+                       decoded_word(w + 2));
+  case GX_VA_CLR0:
+  case GX_VA_CLR1: {
+    // Direct colours are big-endian; indexed ones follow their array (attr_address).
+    const bool le = mapping.attrType == GX_DIRECT ? false : mapping.le;
+    switch (mapping.compType) {
+    case GX_RGB565:
+      return fmt::format("clr_w_rgb565({}, {})", decoded_word(w), le);
+    case GX_RGB8:
+      return fmt::format("clr_w_rgb8({})", decoded_word(w));
+    case GX_RGBX8:
+      return fmt::format("clr_w_rgbx8({})", decoded_word(w));
+    case GX_RGBA4:
+      return fmt::format("clr_w_rgba4({}, {})", decoded_word(w), le);
+    case GX_RGBA6:
+      return fmt::format("clr_w_rgba6({}, {})", decoded_word(w), le);
+    case GX_RGBA8:
+      return fmt::format("clr_w_rgba8({})", decoded_word(w));
+    default:
+      Log.fatal("decoded_attr_load: colour type {}", mapping.compType);
+    }
+  }
+  default:
+    if (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7) {
+      return fmt::format("bitcast<vec2f>(vec2u({}, {}))", decoded_word(w), decoded_word(w + 1));
+    }
+    Log.fatal("decoded_attr_load: attr {}", attr);
+  }
+}
+
 auto attr_load(const ShaderConfig& config, GXAttr attr, std::string_view vidx) -> std::string {
   const auto& mapping = config.attrs[attr];
   if (mapping.attrType == GX_NONE) {
     return vtx_attr(config, attr);
+  }
+  if (config.decodedVtx) {
+    return decoded_attr_load(config, attr);
   }
   const auto [offs, buf, le] = attr_address(mapping, attr, vidx, config.vtxStride, 0u, 0u);
   switch (attr) {
@@ -997,6 +1116,16 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
     vidxAttr = "in_vidx"sv;
   } else if (config.attrs[GX_VA_PNMTXIDX].attrType == GX_NONE) {
     vtxXfrAttrsPre += "\n    let in_pnmtxidx = imm.current_pnmtx;";
+  }
+
+  // strikers-quest: decoded draws read their vertex's vec4 slots once (vertex_decode.hpp layout);
+  // the attribute expressions below then pick words out of them.
+  if (config.decodedVtx) {
+    const auto layout = vertex_decode::layout_for(config);
+    vtxXfrAttrsPre += fmt::format("\n    let dbase = imm._pad + {} * {}u;", vidxAttr, layout.strideWords / 4);
+    for (u32 s = 0; s < layout.strideWords / 4; ++s) {
+      vtxXfrAttrsPre += fmt::format("\n    let dv{0} = load_dv(dbase + {0}u);", s);
+    }
   }
 
   // Load vertex attributes
@@ -1990,8 +2119,7 @@ struct Uniform {{
     render_viewport_size: vec2f,
     logical_viewport_size: vec2f,{0}
 }};
-@group(0) @binding(0)
-var<storage, read> vbuf: array<u32>;
+{9}
 @group(0) @binding(1)
 var<storage, read> abuf: array<u32>;
 @group(1) @binding(0)
@@ -2015,7 +2143,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {{{6}{5}
 }}
 )""",
                                         uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn,
-                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre);
+                                        fragmentFnPre, vtxXfrAttrsPre, uniformPre,
+                                        config.decodedVtx ? DecodedVertexBinding : PulledVertexBinding);
   if (EnableDebugPrints) {
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
   }

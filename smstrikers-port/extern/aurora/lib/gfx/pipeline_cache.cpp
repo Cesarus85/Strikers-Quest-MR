@@ -10,6 +10,7 @@
 #endif
 #include "../sqlite_utils.hpp"
 #include "../webgpu/gpu.hpp"
+#include "../xr_waits.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -541,6 +542,7 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   }
 
   if (blocking && !pipelineReady) {
+    const xr_waits::Scope waited{xr_waits::Pipeline};
     std::unique_lock lock{g_pipelineMutex};
     g_pipelineReadyCv.wait(lock, [=] { return g_pipelines.contains(hash) || g_pipelineThreadEnd; });
     auto pipelineIt = g_pipelines.find(hash);
@@ -1040,7 +1042,8 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
     }
     if constexpr (requires { config.msaaSamples; }) {
       // smstrikers-port: a row for another sample count compiles a pipeline this run cannot use; it stays for one that can.
-      if (config.msaaSamples != webgpu::g_graphicsConfig.msaaSamples) {
+      // strikers-quest: 4x rows are the headset's eye passes (ExternalPassTarget::sampleCount); keep them warm too.
+      if (config.msaaSamples != webgpu::g_graphicsConfig.msaaSamples && config.msaaSamples != 4) {
         continue;
       }
     }
@@ -1209,6 +1212,11 @@ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline) {
   }
   pipeline = it->second.pipeline;
   return true;
+}
+
+bool pipeline_ready(PipelineRef ref) {
+  std::lock_guard guard{g_pipelineMutex};
+  return g_pipelines.contains(ref);
 }
 
 } // namespace aurora::gfx

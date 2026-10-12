@@ -1,5 +1,9 @@
 # Android
 
+> **This fork is the Meta Quest version.** Start with the [README at the top of the repo](../README.md).
+> This page is the phone port's own documentation (upstream), kept for the build details; its
+> `apk/` folder and some of its notes do not apply to the Quest build.
+
 Super Mario Strikers, natively, on an arm64 Android device. Same game code, same Aurora, same
 renderer; what is Android-specific is confined to four files and a Gradle project.
 

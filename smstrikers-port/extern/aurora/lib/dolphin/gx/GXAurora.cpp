@@ -97,3 +97,8 @@ void GXRestoreFrameBuffer() {
   GX_WRITE_AURORA(GX_AURORA_END_OFFSCREEN);
   aurora::gx::fifo::publish();
 }
+
+void GXAuroraSetDecodeScope(u8 on) {
+  GX_WRITE_AURORA(GX_AURORA_DECODE_SCOPE);
+  GX_WRITE_U8(on != 0 ? 1 : 0);
+}

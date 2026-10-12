@@ -1,7 +1,9 @@
 #include "command_processor.hpp"
 
 #include "../gfx/depth_peek.hpp"
+#include "../gfx/pipeline_cache.hpp"
 #include "../gfx/recording.hpp"
+#include "../gfx/resources.hpp"
 #include "../internal.hpp"
 #include "fifo.hpp" // smstrikers-port: display list provenance
 #include "dolphin/gd/GDGeometry.h"
@@ -11,11 +13,19 @@
 #include "regs.hpp"
 #include "shader_info.hpp"
 #include "texture.hpp"
+#include "vertex_decode.hpp"
 
+#include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
+#include <xxhash.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+
+// recording.cpp: bytes used so far in this frame's fixed pools (vertex, uniform, index, storage).
+extern "C" void aurora_gfx_pool_usage(uint32_t* usedBytes, size_t count);
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -194,8 +204,50 @@ struct DrawCache {
   FogRangeLutKey fogRangeKey{};
   bool hasFogRange = false;
   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
+  // strikers-quest: the decoded twin of this pipeline (vertex_decode.hpp), re-derived with it.
+  bool decodeChecked = false;
+  vertex_decode::Layout decodeLayout{};
+  gfx::PipelineRef decodedRef{};
+  bool decodedReady = false;
 };
 DrawCache sDrawCache;
+
+// strikers-quest: decode once per game frame, reuse across the sends (normal view + eyes). Owned by
+// the FIFO thread; cleared in-band at each game send boundary (CP_CMD_INVAL_VTX, written when the
+// game flips its double-buffered frame memory, so recycled addresses never hit an old entry) and on
+// the main thread after the end-of-frame drain (clear_draw_cache: the vertex-pool Ranges die with
+// the frame). The key covers the raw vertex bytes, the vertex format and each indexed array's
+// pointer/size/stride/endianness; the arrays' contents are fixed within a game send (the existing
+// array cachedRange relies on the same).
+std::atomic<int> sDecodeMode{0};  // aurora_xr_set_vertex_decode
+bool sDecodeScope = false;        // GX_AURORA_DECODE_SCOPE
+bool sLastDrawDecoded = false;    // a decoded draw must not be merged into
+struct DecodeEntry {
+  u32 base = 0;  // vec4 index into the vertex pool
+  bool ok = false;
+};
+absl::flat_hash_map<u64, DecodeEntry> sDecodeCache;
+std::vector<u32> sDecodeScratch;
+struct DecodeStats {
+  std::atomic<u32> decoded{0}, reused{0}, vertices{0}, fallback{0}, ineligible{0}, micros{0};
+};
+DecodeStats sDecodeStats;
+// Decoded bytes pushed into the vertex pool, ever (the headset's pool guard keeps them out of its
+// per-send estimates: they are paid once per frame, not per send).
+std::atomic<uint64_t> sDecodedBytesTotal{0};
+std::atomic<uint64_t> sDecodedBytesFrame{0};      // this aurora frame so far
+std::atomic<uint64_t> sDecodedBytesLastFrame{0};  // the last completed aurora frame
+// Decoding stops (draws keep pulling) once the frame's vertex pool is this full: an overflow aborts.
+// Decoded copies are 5-7x the raw bytes, and the eye sends still need room for their raw pushes.
+constexpr double kDecodePoolLimit = 0.6;
+
+bool decode_candidate(GXPrimitive prim) noexcept {
+  const int mode = sDecodeMode.load(std::memory_order_relaxed);
+  if (mode == 0 || (mode == 1 && !sDecodeScope)) {
+    return false;
+  }
+  return prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
+}
 
 FogRangeLutKey fog_range_lut_key() noexcept {
   const auto& state = g_gxState.fog;
@@ -393,7 +445,11 @@ ProcessResult process(const u8* data, u32 size, uint64_t streamPos) noexcept {
     }
 
     case CP_CMD_INVAL_VTX: {
-      // Invalidate vertex cache
+      // Invalidate vertex cache. strikers-quest: the game writes this as it flips its double-buffered
+      // frame memory (glplatFrameAllocNextFrame), after every send of a game frame: decoded vertices
+      // keyed on array addresses must not outlive it.
+      sDecodeCache.clear();
+      sDecodeScope = false;
       break;
     }
 
@@ -618,22 +674,115 @@ static u32 calc_vtx_size(GXVtxFmt fmt) noexcept {
   FATAL("unsupported primitive type {}", static_cast<u32>(cmd & CP_OPCODE_MASK));
 }
 
+// strikers-quest: for a decode candidate whose decoded pipeline is built, point the draw at this
+// frame's decoded copy of its vertices (decoding them now on a cache miss). False = pull as before.
+static bool try_decode(const u8* vtxData, u16 vtxCount, DrawImmediateData& immediates,
+                       gfx::PipelineRef& pipelineRef) noexcept {
+  auto& cache = sDrawCache;
+  if (!cache.decodeChecked) {
+    cache.decodeChecked = true;
+    cache.decodedReady = false;
+    cache.decodeLayout = vertex_decode::layout_for(cache.config.shaderConfig);
+    if (cache.decodeLayout.valid) {
+      PipelineConfig decodedConfig = cache.config;
+      decodedConfig.shaderConfig.decodedVtx = true;
+      cache.decodedRef = gfx::pipeline_ref(decodedConfig);  // queues the build on first sight
+    }
+  }
+  if (!cache.decodeLayout.valid) {
+    sDecodeStats.ineligible.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  if (!cache.decodedReady) {
+    // Until it is built the draw keeps the pulling pipeline: never a missing player.
+    cache.decodedReady = gfx::pipeline_ready(cache.decodedRef);
+    if (!cache.decodedReady) {
+      sDecodeStats.fallback.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+  }
+
+  const auto& sc = cache.config.shaderConfig;
+  struct KeyArray {
+    u64 data;
+    u32 size;
+    u8 stride;
+    u8 le;
+    u16 pad;
+  };
+  static_assert(sizeof(KeyArray) == 16);
+  std::array<KeyArray, MaxVtxAttr> keyArrays{};
+  std::array<vertex_decode::ArraySource, MaxVtxAttr> sources{};
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (sc.attrs[i].attrType != GX_INDEX8 && sc.attrs[i].attrType != GX_INDEX16) {
+      continue;
+    }
+    const auto& array = g_gxState.arrays[i];
+    keyArrays[i].data = reinterpret_cast<uintptr_t>(array.data);
+    keyArrays[i].size = array.size;
+    keyArrays[i].stride = array.stride;
+    keyArrays[i].le = array.le ? 1 : 0;
+    sources[i] = {static_cast<const u8*>(array.data), array.size};
+  }
+  const size_t vtxBytes = static_cast<size_t>(vtxCount) * sc.vtxStride;
+  const u64 formatHash = XXH3_64bits(sc.attrs.data(), sizeof(sc.attrs)) ^ (static_cast<u64>(sc.vtxStride) << 56);
+  const u64 key = XXH3_64bits_withSeed(vtxData, vtxBytes, XXH3_64bits_withSeed(keyArrays.data(), sizeof(keyArrays),
+                                                                                   formatHash)) ^
+                  vtxCount;
+
+  auto [it, inserted] = sDecodeCache.try_emplace(key);
+  if (!inserted) {
+    if (!it->second.ok) {
+      sDecodeStats.ineligible.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    immediates.decodedBase = it->second.base;
+    pipelineRef = cache.decodedRef;
+    sDecodeStats.reused.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
+  const u32 words = cache.decodeLayout.strideWords;
+  const size_t decodedBytes = static_cast<size_t>(vtxCount) * words * sizeof(u32) + 15;  // + alignment pad
+  {
+    uint32_t used[1] = {0};
+    aurora_gfx_pool_usage(used, 1);
+    if (static_cast<double>(used[0]) + static_cast<double>(decodedBytes) >
+        static_cast<double>(gfx::VertexBufferSize) * kDecodePoolLimit) {
+      sDecodeCache.erase(it);  // later sends check again (cheap) and keep pulling
+      sDecodeStats.fallback.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  sDecodeScratch.resize(static_cast<size_t>(vtxCount) * words);
+  if (!vertex_decode::decode(sc, cache.decodeLayout, vtxData, vtxCount, sources, sDecodeScratch.data())) {
+    it->second.ok = false;  // an index past its array: keep pulling, as before
+    sDecodeStats.ineligible.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  const auto range = gfx::push_verts(reinterpret_cast<const uint8_t*>(sDecodeScratch.data()),
+                                     sDecodeScratch.size() * sizeof(u32), 16);
+  it->second = {range.offset / 16, true};
+  sDecodedBytesTotal.fetch_add(decodedBytes, std::memory_order_relaxed);
+  sDecodedBytesFrame.fetch_add(decodedBytes, std::memory_order_relaxed);
+  immediates.decodedBase = range.offset / 16;
+  pipelineRef = cache.decodedRef;
+  sDecodeStats.decoded.fetch_add(1, std::memory_order_relaxed);
+  sDecodeStats.vertices.fetch_add(vtxCount, std::memory_order_relaxed);
+  sDecodeStats.micros.fetch_add(
+      static_cast<u32>(
+          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()),
+      std::memory_order_relaxed);
+  return true;
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
-                         u32 numIndices) noexcept {
+                         u32 numIndices, const u8* vtxData) noexcept {
   auto& state = g_gxState;
   auto& cache = sDrawCache;
 
   DrawImmediateData immediates{.vtxStart = vertRange.offset, .currentPnMtx = state.currentPnMtx};
-  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
-    if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
-      continue;
-    }
-    auto& array = state.arrays[i];
-    if (array.cachedRange.size == 0) {
-      array.cachedRange = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
-    }
-    immediates.arrayStart[i - GX_VA_POS] = array.cachedRange.offset;
-  }
 
   const u8 lineMode = line_mode_for_prim(prim);
   const bool pipelineValid = cache.hasPipeline && (state.dirty & DirtyPipeline) == 0 && cache.fmt == fmt &&
@@ -648,10 +797,29 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     cache.fmt = fmt;
     cache.lineMode = lineMode;
     cache.hasPipeline = true;
+    cache.decodeChecked = false;
     state.dirty = (state.dirty & ~DirtyPipeline) | DirtyUniform;
     if (!hadPipeline || prevSampledTextures != cache.shaderInfo.sampledTextures ||
         prevSampledIndTextures != cache.shaderInfo.sampledIndTextures) {
       cache.bindGeneration = 0;
+    }
+  }
+
+  // strikers-quest: decoded draws read their own vertex copy and need no arrays in the storage pool.
+  gfx::PipelineRef pipelineRef = cache.pipelineRef;
+  const bool decoded =
+      vtxData != nullptr && vtxCount != 0 && decode_candidate(prim) && try_decode(vtxData, vtxCount, immediates, pipelineRef);
+  sLastDrawDecoded = decoded;
+  if (!decoded) {
+    for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+      if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
+        continue;
+      }
+      auto& array = state.arrays[i];
+      if (array.cachedRange.size == 0) {
+        array.cachedRange = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      }
+      immediates.arrayStart[i - GX_VA_POS] = array.cachedRange.offset;
     }
   }
 
@@ -696,7 +864,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
   cache.lastDrawFmt = fmt;
   gfx::push_draw_command(DrawData{
-      .pipeline = cache.pipelineRef,
+      .pipeline = pipelineRef,
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = cache.uniformRange,
@@ -705,11 +873,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .indexCount = numIndices,
       .instanceCount = instanceCount,
       .bindGroups = cache.bindGroups,
-      .dstAlpha = state.dstAlpha,
+      // strikers-quest: the coverage mode lives in the pipeline config (gx.hpp g_xrCoverage).
+      .dstAlpha = cache.config.dstAlpha == XrCoverageDstAlpha ? XrCoverageDstAlpha : state.dstAlpha,
   });
 }
 
-static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange) noexcept {
+static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
+                                 const u8* vtxData) noexcept {
   ZoneScoped;
   u32 numIndices = 0;
   gfx::Range idxRange;
@@ -722,7 +892,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
     idxBuf.clear();
   }
 
-  push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices);
+  push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices, vtxData);
 }
 
 
@@ -803,8 +973,14 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Reader& read
   if (totalVtxBytes > reader.remaining())
     UNLIKELY { handle_draw_overrun(totalVtxBytes, reader); }
 
+  // strikers-quest: a draw that will decode stays its own draw (its vertices are decoded per draw),
+  // and nothing merges into a decoded draw (its vertex range is followed by its decoded copy). With a
+  // clean state the cache holds this draw's pipeline, so "will decode" is known here.
+  const bool willDecode = decode_candidate(prim) && sDrawCache.decodeChecked && sDrawCache.decodeLayout.valid &&
+                          sDrawCache.decodedReady;
   const bool cleanState = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
-                          prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
+                          prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS && !sLastDrawDecoded &&
+                          !willDecode;
   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
   const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
 
@@ -848,7 +1024,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, Reader& read
     return;
   }
 
-  handle_draw_unmerged(prim, fmt, vtxCount, vertRange);
+  handle_draw_unmerged(prim, fmt, vtxCount, vertRange, vertexData.data());
 }
 
 static void handle_draw(u8 cmd, Reader& reader) noexcept {
@@ -1051,7 +1227,7 @@ void handle_aurora(Reader& reader) noexcept {
     diag_check_indices(vertexData.data(), vtxCount, fmt, vtxSize);   // smstrikers-port
     const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
     if (indexCount != 0) {
-      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
+      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount, vertexData.data());
     }
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = reader.read_string();
@@ -1061,6 +1237,8 @@ void handle_aurora(Reader& reader) noexcept {
   } else if (subCmd == GX_AURORA_DEBUG_MARKER_INSERT) {
     auto label = reader.read_string();
     gfx::insert_debug_marker(std::move(label));
+  } else if (subCmd == GX_AURORA_DECODE_SCOPE) {
+    sDecodeScope = reader.read<u8>() != 0;
   }
 
   else {
@@ -1073,6 +1251,33 @@ void clear_draw_cache() noexcept {
   sDrawCache.uniformRange = {};
   sDrawCache.fogRange = {};
   sDrawCache.hasFogRange = false;
+  // strikers-quest: decoded copies live in this frame's vertex pool.
+  sDecodeCache.clear();
+  sDecodeScope = false;
+  sLastDrawDecoded = false;
+  sDecodedBytesLastFrame.store(sDecodedBytesFrame.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 } // namespace aurora::gx::fifo
+
+extern "C" unsigned long long aurora_xr_decoded_bytes(void) {
+  return aurora::gx::fifo::sDecodedBytesTotal.load(std::memory_order_relaxed);
+}
+
+extern "C" unsigned long long aurora_xr_decoded_bytes_last_frame(void) {
+  return aurora::gx::fifo::sDecodedBytesLastFrame.load(std::memory_order_relaxed);
+}
+
+extern "C" void aurora_xr_set_vertex_decode(int mode) {
+  aurora::gx::fifo::sDecodeMode.store(mode < 0 ? 0 : (mode > 2 ? 2 : mode), std::memory_order_relaxed);
+}
+
+extern "C" void aurora_xr_take_decode_stats(u32 out[6]) {
+  auto& s = aurora::gx::fifo::sDecodeStats;
+  out[0] = s.decoded.exchange(0, std::memory_order_relaxed);
+  out[1] = s.reused.exchange(0, std::memory_order_relaxed);
+  out[2] = s.vertices.exchange(0, std::memory_order_relaxed);
+  out[3] = s.fallback.exchange(0, std::memory_order_relaxed);
+  out[4] = s.ineligible.exchange(0, std::memory_order_relaxed);
+  out[5] = s.micros.exchange(0, std::memory_order_relaxed);
+}

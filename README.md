@@ -1,90 +1,330 @@
-# Strikers — Android
+# Quest 3 Strikers
 
-Super Mario Strikers, running natively on an arm64 Android phone. Not an emulator: the same game
-code and the same renderer as the desktop port, compiled for ARM and drawing through Vulkan.
+<p align="center"><img src="media/quest3-strikers.jpg" width="360" alt="Quest 3 Strikers: a mixed reality soccer experience"></p>
 
-![](media/android/menu.webp)
+Super Mario Strikers (GameCube), running natively on a Meta Quest 3 as a mixed-reality app. Not an
+emulator: the game is built from the community decompilation, compiled for the headset's ARM chip,
+and drawn straight into your room through OpenXR.
 
-*Requires game data from your own copy of Super Mario Strikers. **No game assets are included.***
+This is a fork of [`luisxl15/Strikers-Android-Port`](https://github.com/luisxl15/Strikers-Android-Port),
+the Android phone port, with a Quest layer on top.
 
-## Download
-
-[**`apk/strikers-android-1.2.0-arm64.apk`**](apk/) — arm64-v8a, Android 9 (API 28) or later, Vulkan
-required. The checksum and a note on what the signature does and does not prove are in the same
-folder.
+*You need your own copy of the game. **No game files are included**, in this repository or in the
+APK.*
 
 ## What it is
 
-This repository is the Android side of [`new-coke/strikers`](https://github.com/new-coke/strikers),
-the native PC port of the game, which in turn is built on the community decompilation by
-[Yannick Suter](https://github.com/yannicksuter). The full history of that port is preserved here;
-the Android work is one commit on top of it.
+Four ways to watch the same match, switched any time with the controller sticks:
 
-What is Android-specific lives in four native files and a Gradle project. Everything else — the
-game, [Aurora](https://github.com/encounter/aurora), the renderer — is shared with the desktop port
-and gets its fixes for free.
+- **Jumbotron · Living Room**: a big flat screen floating in your real room (passthrough), in three
+  sizes. This is where the game starts.
+- **Jumbotron · Stadium**: the same screen, but you stand on the pitch of a life-size stadium, the
+  one your match is being played in.
+- **Tabletop · Living Room**: the match as a miniature 3D pitch in your room, like a foosball table
+  with the electric fence for walls. Put it on a real table, the bed or the floor, walk around it,
+  grab it, turn it and resize it with your hands. The players are drawn a bit bigger so they read at
+  table size, an arrow floats over the player you control, and a small score board hangs over the
+  field.
+- **Tabletop · Stadium**: the table inside the life-size stadium, with the stands all the way around
+  you.
 
-## The app
+And around the game:
 
-![](media/android/launcher.webp)
+- **Goal celebrations in 3D**: confetti in the scorer's colours plus their own piece (coins for
+  Mario, hearts for Peach, bananas for Donkey Kong, and so on), confetti cannons, streamers, foil,
+  pyro and fireworks, landing on your floor and on the table. In the Tabletop modes the goal replay
+  plays on a jumbotron that drops from the ceiling (or the sky, in the stadium). Skip the replay and
+  it all stops.
+- **The game's own white flashes** (replay wipes, the Super Strike flash) light up your whole view,
+  not just the picture.
+- **Controller rumble**: the game's rumble reaches the Touch controllers, with an extra buzz on your
+  goals.
+- **Online 1v1 with room codes**: one player hosts and reads out a four-letter code, the other types
+  it in. Each player keeps their own view mode.
+- **Your disc image as it is**: `.iso`, `.gcm` (NKit too), `.ciso`, `.gcz` and Dolphin's `.rvz`.
 
-A launcher, not just a window with a game in it. It answers *"where is the disc?"* before loading
-anything: the game itself would answer that perfectly well, but only after a black screen and a
-process that then exits, which on a phone reads as a crash.
+## Status
 
-The game folder is `/Strikers` at the **root of shared storage**, not buried under `Android/data`,
-so a file manager can actually reach it. That needs the all-files permission; without it the app
-falls back to its private folder and says so.
+**Free alpha.** Tested on Quest 3, including online matches between two Quest 3 headsets. Every
+other headset is untested: the Quest 3S has the same chip and should behave the same, but nobody
+has tried it yet. Expect rough edges, and see [Known issues](#known-issues).
 
-- **On-screen controls in the Xbox 360 layout**, drawn by hand with a blurred-glass backdrop,
-  multitouch finger-to-control locking and an adjustable dead zone. They hide themselves while a
-  real controller is connected.
-- **Settings** for video, controls and the game, projected into `strikers.ini` while preserving
-  anything the player wrote there by hand — comments included.
-- **A performance panel** in the style of a hardware monitor. It shows FPS and frame cost from the
-  port's own limiter, plus RAM, temperature and GPU load *when the device exposes them* — and `--`
-  when it does not, rather than a decorative number.
-- **Nine languages**: English, Portuguese (Brazil), Spanish, French, German, Italian, Japanese,
-  Simplified Chinese and Russian, switchable independently of the phone's own language.
+## How to install (easy version)
 
-## Video drivers
+**You need:** a Meta Quest 3, a PC, a USB-C cable, and your own copy of Super Mario Strikers
+(GameCube) as a file ending in **`.iso`** or **`.rvz`**. We can't give you the game file; it has to
+be your own.
 
-![](media/android/drivers.webp)
+**Step 1: Turn on Developer Mode** (one time only)
+1. On your phone, open the **Meta Horizon** app.
+2. Tap **Devices**, pick your Quest, tap **Headset settings**, then **Developer mode**, and switch it
+   **on**. (If it asks you to make a free developer account first, do that, then come back.)
+3. Restart the headset.
 
-The game draws through Vulkan, and on Android the Vulkan driver is whatever the manufacturer
-shipped. The app can load a different one — [Turnip](https://docs.mesa3d.org/drivers/freedreno.html),
-Mesa's open driver for Adreno GPUs — through
-[libadrenotools](https://github.com/bylaws/libadrenotools), by packaging its own `libvulkan.so` that
-the loader finds before the system's.
+**Step 2: Get SideQuest on your PC** (one time only)
+1. Go to [sidequestvr.com](https://sidequestvr.com/setup-howto) and download the free
+   **SideQuest Advanced Installer** for your PC. Install it and open it.
+2. Plug your Quest into the PC with the USB-C cable.
+3. Put the headset on. When it asks **"Allow USB debugging?"**, tick **Always allow from this
+   computer** and press **Allow**. Take the headset off.
+4. The dot at the top left of SideQuest turns **green**. That means you're connected.
 
-On a device whose factory driver is old this usually goes faster. On a new device it usually changes
-nothing, and the screen says so instead of selling an improvement that does not arrive. Changing the
-driver affects this app only.
+**Step 3: Install the game app**
+1. Go to the [**Releases page**](../../releases/latest) and download the **`.apk`** file under
+   **Assets**.
+2. Drag that `.apk` file onto the SideQuest window. Wait until it says it's done.
 
-Packages can be imported from a `.zip` or downloaded from the list, whose addresses are on screen on
-purpose: downloading one brings third-party code that runs inside the game.
+**Step 4: Put your game file on the headset**
+1. In SideQuest, click the **folder icon** at the top ("Manage files on the headset").
+2. Open the **Download** folder.
+3. Drag your `.iso` or `.rvz` file in. It's a big file, so give it a few minutes.
 
-## Building
+**Step 5: Play**
+1. Unplug the headset and put it on.
+2. Open your **Library**, click the menu at the top right that says **All**, and pick
+   **Unknown Sources**.
+3. Open **Quest 3 Strikers**. A small menu pops up: **Play offline**, **Host an online match** or
+   **Join with a code**.
+4. **First time only:** pressing a button opens a settings screen. Turn on **"Allow access to manage
+   all files"**, go back, and press the same button again.
 
-Two steps, deliberately separate. The native build is CMake and the NDK, the same build every other
-platform gets; Gradle only packages what it produced, so Gradle's own idea of which CMake and which
-NDK to use never gets a vote.
+That's it. Next time, just do Step 5 (parts 2 and 3).
+
+**Updating:** download the new `.apk` from the Releases page and drag it onto SideQuest again (Step
+3). Your saves and your game file stay.
+
+## Play online with a friend
+
+Both of you need the **same version** of the app, and your own game files.
+
+1. **One of you hosts:** press **Host an online match**. You get a 4-letter code. Tell it to your
+   friend, then press **Start**.
+2. **The other joins:** press **Join with a code**, type the code, press **Join**.
+3. **Both of you:** pick **Grudge Match** on the main menu, choose your teams and start. Whoever
+   gets there first waits a moment on the loading screen. Then you're playing each other.
+
+## If something goes wrong
+
+- **"It can't find my game":** make sure the `.iso` or `.rvz` file is in the headset's
+  **Download** folder (Step 4) and that it's Super Mario Strikers for GameCube. Keep only one
+  Strikers file in there.
+- **The menu keeps asking for file access:** in the settings screen, make sure the switch is on for
+  **Quest 3 Strikers**.
+- **The game closed:** open it again from Unknown Sources.
+- **Online, you ended up playing the computer:** back out to the main menu. Make sure you both
+  used the same code, then both start Grudge Match again.
+- **A `.rvz` that won't open:** convert it to `.iso` with [Dolphin](https://dolphin-emu.org)
+  (right-click the game, **Convert File**, pick ISO).
+
+<details>
+<summary>More detail: disc versions, file formats, where the game looks</summary>
+
+- The US version (disc code `G4QE01`) is the tested one. The port also reads the European
+  (`G4QP01`, sold as *Mario Smash Football*) and Japanese (`G4QJ01`) discs; those are untested on
+  the headset.
+- Formats: `.iso`, `.gcm`, `.ciso`, `.gcz`, or `.rvz` made by Dolphin with its default zstd
+  compression (or none). `.wia`, and `.rvz` made with bzip2 or LZMA, are not readable; convert those
+  to `.iso` in Dolphin.
+- Where the game looks for the disc, in order: a folder called `Strikers` at the top of the
+  headset's storage (the game creates it, and keeps its settings and log there), then the top of
+  the storage itself, `Games/Strikers`, `ROMs/GameCube` and `Download`. If a folder holds several
+  GameCube disc images, the game takes the one whose name comes first alphabetically.
+- Instead of SideQuest you can use `adb install` and `adb push`, or the headset's own USB file
+  access (allow it inside the headset, and it shows up on the PC as a drive).
+- Hand tracking is not supported; use the Touch controllers.
+
+</details>
+
+More about online play:
+
+- Start your Grudge Match only once both of you are in the game with the code. If your friend is
+  not in the room yet, your match starts offline straight away; back out and start again. If they
+  never start one, yours goes offline after three minutes.
+- One headset is picked automatically as the home side, and its stadium and match settings are
+  used.
+- Each player has their own view: one can play on the table while the other plays on the big
+  screen.
+- If the connection is lost for about ten seconds, the online match ends. Go back to the menu and
+  start a new Grudge Match.
+- A room code is not a password: anyone who types the same code lands in the same room. While two
+  players are playing, a third headset in the room is ignored. Join also takes your own made-up
+  code (3 to 8 letters or numbers), as long as you both type the same one.
+- The connection goes through a small free relay (see [The room server](#the-room-server)). It only
+  passes game messages along (button presses and team picks) and stores nothing. Like any web
+  service, its host sees your IP address.
+
+## Controls
+
+The Touch controllers act as a GameCube pad:
+
+| Touch controller | Does |
+| --- | --- |
+| Left stick | Control stick (move) |
+| Right stick | C-stick |
+| A, B (right) | A (pass), B (shoot) |
+| X, Y (left) | X (use item), Y (hit) |
+| Left / right trigger | L / R |
+| Right grip | Z (swap items) |
+| Menu button (left) | Start (pause) |
+
+The stick clicks, the buttons a GameCube pad never had, change the view. Double taps, so a stray
+click in a match does nothing:
+
+| Stick click | Does |
+| --- | --- |
+| Double-tap the left stick | Living Room / Stadium |
+| Double-tap the right stick | Jumbotron / Tabletop |
+| Tap the right stick | Next screen size (Jumbotron) |
+| Tap the left stick | Bring the table in front of you (Tabletop) |
+
+Moving the table (Tabletop):
+
+- **Left grip**: grab the table from anywhere and carry it, up and down too. While you hold it with
+  the left hand alone, the left stick resizes it (up/down) and turns it (left/right).
+- **Both grips**: with the left grip held and the right hand squeezing on or right next to the
+  table, pull your hands apart or together to resize it, and turn them around each other to rotate
+  it.
+- The right grip on its own is still Z. It only grabs the table when the squeeze starts with your
+  hand on the table.
+
+A Bluetooth gamepad paired to the headset also works offline, alongside the Touch controllers.
+
+## Known issues
+
+- **The Stadium modes run below the headset's refresh rate**, at roughly 40 to 48 frames a second.
+  The Jumbotron in your room and Tabletop · Living Room run at full speed. Offline, the game itself
+  still runs at its normal speed.
+- **Online, the slower headset sets the pace for both.** A headset that can't keep up in a 3D mode
+  redraws its 3D view every other frame for the rest of that match.
+- **Online uses the Touch controllers only.** A Bluetooth gamepad's buttons are not sent to your
+  friend, so don't use one in an online match.
+- **Both players need the same release of the app.** With different versions the two headsets
+  ignore each other and each plays offline. Players on different disc regions are untested.
+- **The game's video clips don't play** (the intro and attract movies): this build has no video
+  decoder. Everything else runs without them.
+- **Don't open the app from the Library during a match.** The panel comes up in front of the game
+  and pauses it; online, your friend's headset ends the match after about ten seconds. Use the
+  Quest menu to quit, then open the app again.
+- **The shared room server runs on Cloudflare's free plan.** If it hits the free daily limit,
+  online play won't connect until the limit resets (00:00 UTC). Offline play is not affected.
+
+To report a problem, the game's log is `Strikers/strikers-log.txt` on the headset's storage.
+
+## Building from source
+
+Most players don't need this. The build is two steps: CMake and the Android NDK build the game,
+then Gradle packages it.
+
+You need:
+
+- The Android SDK with NDK **29.0.14206865** (the one Aurora's prebuilt Dawn is built with),
+  `platforms;android-35`, `build-tools;35.0.1` and `cmake;3.31.6` (which also brings Ninja).
+- JDK 17, Python 3 and a POSIX shell (on Windows, Git Bash).
+- An internet connection the first time: CMake downloads SDL3, Aurora's prebuilt Dawn and a few
+  smaller libraries, and Gradle downloads itself.
+- The Khronos OpenXR loader for Android, **1.1.63**
+  ([`openxr_loader_for_android-1.1.63.aar`](https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/1.1.63/)
+  on Maven Central), unpacked into a folder with `include/openxr/*.h` and
+  `lib/arm64-v8a/libopenxr_loader.so`. Point `STRIKERS_OPENXR_ROOT` at that folder.
 
 ```sh
-tools/build-android.sh                    # the game  -> build-android/jniLibs/arm64-v8a/
-cd android && ./gradlew assembleRelease   # the app   -> app/build/outputs/apk/release/
+sdkmanager "ndk;29.0.14206865" "platforms;android-35" "build-tools;35.0.1" "cmake;3.31.6"
+
+# The OpenXR loader: an .aar is a zip.
+export STRIKERS_OPENXR_ROOT="$HOME/openxr"
+mkdir -p "$STRIKERS_OPENXR_ROOT/include" "$STRIKERS_OPENXR_ROOT/lib/arm64-v8a"
+unzip -q openxr_loader_for_android-1.1.63.aar -d openxr-aar
+cp -r "$(dirname "$(find openxr-aar -path '*include/openxr/openxr.h' | head -1)")" \
+      "$STRIKERS_OPENXR_ROOT/include/"
+cp "$(find openxr-aar -path '*arm64-v8a*' -name libopenxr_loader.so | head -1)" \
+   "$STRIKERS_OPENXR_ROOT/lib/arm64-v8a/"
+
+# The game, then the app.
+export ANDROID_SDK_ROOT="/path/to/android-sdk"
+export PATH="$ANDROID_SDK_ROOT/cmake/3.31.6/bin:$PATH"
+cd smstrikers-port
+tools/build-android.sh                   # -> build-android/jniLibs/arm64-v8a/
+cd android && ./gradlew assembleDebug    # -> app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Details, requirements and the reasoning behind each Android-specific change are in
-[`smstrikers-port/README-android.md`](smstrikers-port/README-android.md).
+Notes:
+
+- `STRIKERS_OPENXR_ROOT` is read when the build is first configured. If you set it after a failed
+  first try, delete `build-android/` and run the script again.
+- The APK on the Releases page is this debug variant, signed with a development key. A build of
+  your own is signed with your own key, so it won't install over that one without an uninstall
+  first.
+- `PYTHON` and `CMAKE` in the environment override `python3` and `cmake` if yours have other names.
+- The celebration shaders are checked in already compiled (`src/platform/xr_fx_shaders.h`). Only if
+  you change one under `src/platform/shaders/`, rebuild them with `tools/compile-xr-shaders.ps1`
+  and the NDK's `glslc`.
+- The Quest code lives in `src/platform/xr_quest.cpp` (OpenXR session, input, view modes),
+  `xr_layers.cpp` (what goes on the table and what goes in the stadium), `xr_fx.cpp` (celebrations),
+  `xr_net.cpp` with `android/.../NetWs.java` (online), and `android/.../LobbyActivity.java` (the
+  panel). The phone port's notes are in
+  [`smstrikers-port/README-android.md`](smstrikers-port/README-android.md).
+
+## The room server
+
+Online play goes through a tiny relay: a Cloudflare Worker with one Durable Object per room code,
+which passes each message to everyone in the room. Its source is in [`server/`](server/), with
+instructions to run your own copy on Cloudflare's free plan and point the game at it (one line,
+`kServerHost` in `smstrikers-port/src/platform/xr_net.cpp`). Both players need builds that point at
+the same server.
 
 ## Credits
 
-- [Yannick Suter](https://github.com/yannicksuter) and contributors — the decompilation.
-- [`new-coke/strikers`](https://github.com/new-coke/strikers) — the native port this is built on.
-- [encounter/aurora](https://github.com/encounter/aurora) — GX/VI/PAD/CARD over WebGPU and SDL3.
-- [bylaws/libadrenotools](https://github.com/bylaws/libadrenotools) — custom driver loading.
-- Android port by Luis Santos — Brazil.
+- [Yannick Suter](https://github.com/yannicksuter) and contributors: the decompilation.
+- [`new-coke/strikers`](https://github.com/new-coke/strikers): the native port this is built on.
+- [`luisxl15/Strikers-Android-Port`](https://github.com/luisxl15/Strikers-Android-Port) (Luis
+  Santos): the Android port this fork starts from.
+- [encounter/aurora](https://github.com/encounter/aurora): GX/VI/PAD/CARD over WebGPU and SDL3.
+- [JoeyAW/aurora-vr](https://github.com/JoeyAW/aurora-vr) and [JoeyAW/TPVR](https://github.com/JoeyAW/TPVR):
+  the external render-pass and Vulkan/OpenXR hand-off that the headset path follows.
+- [bylaws/libadrenotools](https://github.com/bylaws/libadrenotools): custom GPU driver loading,
+  inherited from the Android port and still built in.
+- [SDL](https://github.com/libsdl-org/SDL), [Dawn](https://dawn.googlesource.com/dawn),
+  [zstd](https://github.com/facebook/zstd) (reads `.rvz`) and the
+  [Khronos OpenXR loader](https://github.com/KhronosGroup/OpenXR-SDK).
+- Button prompt artwork by [Kenney](https://www.kenney.nl) (CC0).
+- Quest mixed-reality port and the Quest 3 Strikers art: [LanceSweatpants](https://github.com/LanceSweatpants).
 
-An unofficial project, unaffiliated with and not endorsed by Nintendo or Next Level Games. No game
-files ship with this app; use your own copy.
+## License
+
+There is no single license for this repository. This is what applies, as far as it can be backed
+up:
+
+- **This fork's Quest additions** (the OpenXR layer, the celebrations, the online play and its room
+  server in `server/`, the panel, and every other change on top of `luisxl15/Strikers-Android-Port`)
+  are free software under the **GNU General Public License, version 3 or (at your option) any later
+  version**. The text is in [`LICENSE`](LICENSE). The `.rvz` reader in
+  `smstrikers-port/src/platform/disc.c` follows Dolphin's code and is GPL-2.0-or-later, used here
+  under GPLv3; GPLv3 is also what lets it sit in one binary with the Apache-2.0 and FreeType-licensed
+  libraries the APK links.
+- **Third-party code compiled into the APK** and the notices its licenses ask for are listed in
+  [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+- **The porting code, tools and docs from `new-coke/strikers`** are offered under CC0 1.0, as that
+  project's README states. The text is in
+  [`smstrikers-port/LICENSE-CC0.txt`](smstrikers-port/LICENSE-CC0.txt).
+- **The reconstructed game code** (the decompilation) is an unofficial reconstruction. It may
+  remain subject to third-party rights; no ownership of those is claimed, and none is granted here.
+- **ODE physics** (`src/ode`, `include/ode`): ODE's BSD-style license
+  ([`LICENSE-BSD.TXT`](smstrikers-port/LICENSE-BSD.TXT), and `src/ode/LICENSE` for what it covers).
+  ODE's own headers also offer the LGPL 2.1, whose text is in
+  [`LICENSE-LGPL-2.1.txt`](smstrikers-port/LICENSE-LGPL-2.1.txt).
+- **`LICENSE-GPL-2.0.txt`** came with the upstream tree, which does not say which files it covers.
+  zstd, below, offers the GPLv2 as one of its two options.
+- **Bundled libraries**, each under its own file: Aurora (MIT, `extern/aurora/LICENSE`), MusyX (MIT,
+  `extern/musyx/LICENSE`), zstd (BSD, `extern/zstd/LICENSE`), and Kenney's button prompts (CC0,
+  `assets/input-prompts/LICENSE-Kenney.txt`). SDL3 (zlib), Dawn (BSD 3-Clause), libadrenotools
+  (BSD 2-Clause), the OpenXR loader (Apache 2.0) and Aurora's other dependencies (abseil, fmt,
+  FreeType, Dear ImGui, libpng, SQLite, xxHash) are downloaded at build time, each under its own
+  license.
+- **The Android port's own code** (`luisxl15/Strikers-Android-Port`) has no license stated by its
+  author. It is included as published there, with credit above.
+
+## Disclaimer
+
+An unofficial project, not affiliated with or endorsed by Nintendo or Next Level Games. Super Mario
+Strikers is a trademark of Nintendo. No game files are included in this repository or in the APK;
+the game runs only from a disc image of your own, legally obtained copy.

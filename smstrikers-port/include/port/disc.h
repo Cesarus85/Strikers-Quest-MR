@@ -36,6 +36,10 @@ int port_disc_inflate(unsigned char* dst, unsigned long* dstLen,
 
 void port_disc_close(PortDisc* disc);
 
+// strikers-quest: opens `path`, reads every file in its filesystem and logs counts, a hash and
+// the time taken (STRIKERS_DISC_SELFTEST, src/platform/dvd.c). A format check, nothing else.
+void port_disc_selftest(const char* path);
+
 #ifdef __cplusplus
 }
 #endif

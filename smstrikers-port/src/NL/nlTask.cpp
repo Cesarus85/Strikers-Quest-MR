@@ -3,6 +3,7 @@
 #include "NL/nlTicker.h"
 #include "NL/nlDLRing.h"
 #include "port/framerate.h" // PORT: PortTaskClockFrame
+#include "port/xr_net.h"    // strikers-quest: the online match's fixed step
 
 #define assert(condition) ((condition) ? ((void)0) : ((void)0))
 
@@ -72,6 +73,9 @@ void nlTaskManager::RunAllTasks()
             if (taskIterator->statesActive & m_pInstance->m_CurrState)
             {
                 clampedDeltaTime = tickerDifference / 1000.f;
+                // strikers-quest: online, every task steps exactly one 60 Hz frame on both headsets.
+                if (PortNetOnline())
+                    clampedDeltaTime = 1.0f / 60.0f;
                 if (clampedDeltaTime < g_fTaskTimeLowerBound)
                 {
                     clampedDeltaTime = g_fTaskTimeLowerBound;

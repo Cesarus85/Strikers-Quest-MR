@@ -8,6 +8,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <type_traits>
+#include <atomic>
 #include <cstring>
 #include <bitset>
 #include <memory>
@@ -85,7 +86,7 @@ struct DrawImmediateData {
   u32 vtxStart = 0;
   u32 currentPnMtx = 0;
   u32 fogRangeBase = 0;
-  u32 _pad = 0;
+  u32 decodedBase = 0;  // strikers-quest: decoded vertex data, in vec4 units of the vertex pool
   std::array<u32, MaxIndexAttr> arrayStart{};
 };
 static_assert(std::has_unique_object_representations_v<DrawImmediateData>);
@@ -434,6 +435,15 @@ struct GXState {
   void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
 };
 extern GXState g_gxState;
+
+// strikers-quest: the headset's Living Room eye passes are composited over passthrough by their
+// alpha, and the game leaves alpha writes off for solid objects (the GameCube never showed EFB
+// alpha), so the field came out see-through. While on, colour-writing draws also write coverage:
+// 1 for solid draws, a + dst * (1 - a) for blended ones, unchanged for additive ones. The pipeline
+// config carries it as dstAlpha = XrCoverageDstAlpha. Toggled only with the FIFO drained
+// (aurora_gx_set_xr_coverage, from src/platform/xr_quest.cpp).
+inline constexpr uint32_t XrCoverageDstAlpha = 0x100;
+extern std::atomic<bool> g_xrCoverage;
 struct ShaderInfo;
 
 void initialize() noexcept;
@@ -495,7 +505,10 @@ struct ShaderConfig {
   u8 vtxStride = 0;
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
   u8 fogRangeEnabled : 1 = false;
-  u8 pad1 : 5 = 0;
+  // strikers-quest: vertex attributes come pre-decoded as floats from the vertex pool
+  // (vertex_decode.hpp) instead of being pulled from the raw GX bytes. 0 keeps every existing config.
+  u8 decodedVtx : 1 = false;
+  u8 pad1 : 4 = 0;
   u8 pad2 = 0;
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;

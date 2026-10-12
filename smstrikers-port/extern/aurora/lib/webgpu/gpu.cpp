@@ -74,6 +74,8 @@ bool g_hasCoreFeatures = false;
 bool g_bcTexturesSupported = false;
 bool g_astcTexturesSupported = false;
 bool g_textureComponentSwizzleSupported = false;
+bool g_xrHeadless = false; // strikers-quest: see gpu.hpp
+bool g_vulkanSharedImageExportSupported = false; // strikers-quest: see gpu.hpp
 static std::atomic_bool g_initialized = false;
 static std::atomic_bool g_vsyncEnabled = true;
 
@@ -790,7 +792,10 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   g_dawnInstance->EnableBackendValidation(backend != WGPUBackendType::D3D12);
 #endif
 
-  if (!create_surface()) {
+  // strikers-quest: headless under XR; the adapter is requested without a compatible surface.
+  if (g_xrHeadless) {
+    Log.info("XR headless: no window surface");
+  } else if (!create_surface()) {
     return false;
   }
   {
@@ -957,6 +962,33 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         }
       }
     }
+#if defined(__ANDROID__)
+    // strikers-quest: GPU-direct hand-off to the OpenXR swapchain (src/platform/xr_quest.cpp). The
+    // XR device exports an opaque-fd VkImage, Dawn imports it, renders into it, and hands back a
+    // SyncFD fence the XR queue waits on. Features cannot be added after device creation, and Dawn
+    // refuses a device with more than one shared-fence type, so SyncFD is preferred (all Quest
+    // reports) and the opaque-fd semaphore is the fallback.
+    {
+      const bool opaqueFdImage = g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryOpaqueFD);
+      const bool dedicated = g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryVkDedicatedAllocation);
+      const bool syncFd = g_adapter.HasFeature(wgpu::FeatureName::SharedFenceSyncFD);
+      const bool opaqueFdFence = g_adapter.HasFeature(wgpu::FeatureName::SharedFenceVkSemaphoreOpaqueFD);
+      if (opaqueFdImage) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryOpaqueFD);
+      }
+      if (dedicated) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryVkDedicatedAllocation);
+      }
+      if (syncFd) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedFenceSyncFD);
+      } else if (opaqueFdFence) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedFenceVkSemaphoreOpaqueFD);
+      }
+      g_vulkanSharedImageExportSupported = opaqueFdImage && (syncFd || opaqueFdFence);
+      Log.info("XR shared image export: {} (opaqueFd={} dedicated={} syncFd={} semFd={})",
+               g_vulkanSharedImageExportSupported, opaqueFdImage, dedicated, syncFd, opaqueFdFence);
+    }
+#endif
     std::string featureList;
     for (auto featureName : requiredFeatures) {
       featureList += "\n  ";
@@ -1050,22 +1082,28 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
   }
   g_queue = g_device.GetQueue();
 
-  const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
-  if (status != wgpu::Status::Success) {
-    Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
-    return false;
-  }
-  if (g_surfaceCapabilities.formatCount == 0) {
-    Log.error("Surface has no formats");
-    return false;
-  }
-  if (g_surfaceCapabilities.presentModeCount == 0) {
-    Log.error("Surface has no present modes");
-    return false;
-  }
-  auto surfaceFormat = best_surface_format();
+  wgpu::TextureFormat surfaceFormat = wgpu::TextureFormat::RGBA8Unorm;
+  wgpu::PresentMode presentMode = wgpu::PresentMode::Fifo;
   g_vsyncEnabled.store(g_config.vsync, std::memory_order_release);
-  auto presentMode = select_present_mode(g_surfaceCapabilities);
+  if (!g_xrHeadless) {
+    const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
+    if (status != wgpu::Status::Success) {
+      Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
+      return false;
+    }
+    if (g_surfaceCapabilities.formatCount == 0) {
+      Log.error("Surface has no formats");
+      return false;
+    }
+    if (g_surfaceCapabilities.presentModeCount == 0) {
+      Log.error("Surface has no present modes");
+      return false;
+    }
+    surfaceFormat = best_surface_format();
+    presentMode = select_present_mode(g_surfaceCapabilities);
+  }
+  // strikers-quest: headless keeps RGBA8Unorm, the format the Android surface reports anyway, so
+  // the copy pipelines and the XR readback see the same frame a flat build would.
   Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
            magic_enum::enum_name(presentMode));
   const auto size = window::get_window_size();
@@ -1123,7 +1161,9 @@ void release_surface() noexcept {
 
 static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight,
                                       bool force) {
-  if (!g_surface || !g_device || width == 0 || height == 0 || nativeHeight == 0 || nativeWidth == 0) {
+  // strikers-quest: headless still needs its framebuffers, just no surface to configure.
+  if ((!g_surface && !g_xrHeadless) || !g_device || width == 0 || height == 0 || nativeHeight == 0 ||
+      nativeWidth == 0) {
     return;
   }
   const bool sizeChanged = g_graphicsConfig.surfaceConfiguration.width != nativeWidth ||
@@ -1140,7 +1180,7 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t 
   g_graphicsConfig.surfaceConfiguration.height = nativeHeight;
   auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
   surfaceConfiguration.device = g_device;
-  {
+  if (g_surface) {
     window::SurfaceLock surfaceLock;
     g_surface.Configure(&surfaceConfiguration);
   }
@@ -1155,15 +1195,18 @@ bool refresh_surface(bool recreate) {
   if (!g_instance || !g_device) {
     return false;
   }
-  if (!window::is_presentable()) {
-    {
-      window::SurfaceLock surfaceLock;
-      release_surface_locked();
+  // strikers-quest: headless never makes a surface; only the framebuffer sizes follow.
+  if (!g_xrHeadless) {
+    if (!window::is_presentable()) {
+      {
+        window::SurfaceLock surfaceLock;
+        release_surface_locked();
+      }
+      return false;
     }
-    return false;
-  }
-  if ((!g_surface || recreate) && !create_surface()) {
-    return false;
+    if ((!g_surface || recreate) && !create_surface()) {
+      return false;
+    }
   }
   uint32_t width = g_graphicsConfig.surfaceConfiguration.width;
   uint32_t height = g_graphicsConfig.surfaceConfiguration.height;

@@ -36,6 +36,9 @@ PipelineRef find_pipeline(ShaderType type, const Config& config, NewPipelineCall
 
 bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
 
+// strikers-quest: true once the pipeline is built (a draw using it would not be skipped).
+bool pipeline_ready(PipelineRef ref);
+
 void get_pipeline_counts(uint32_t& queued, uint32_t& created);
 
 } // namespace aurora::gfx

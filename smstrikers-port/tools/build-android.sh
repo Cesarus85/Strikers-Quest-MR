@@ -106,6 +106,15 @@ for _hook in libmain_hook.so libfile_redirect_hook.so libgsl_alloc_hook.so libho
         echo "warning: $_hook nao foi produzido; o driver escolhido pelo jogador nao vai carregar" >&2
     fi
 done
+# strikers-quest: with the OpenXR layer on, the Khronos loader travels with libmain.so, and the
+# Vulkan shim does not: Dawn and the XR device both use the system loader (see CMakeLists.txt,
+# STRIKERS_XR).
+XR_LOADER=$(sed -n 's/^STRIKERS_OPENXR_LOADER:INTERNAL=//p' "$BUILD/CMakeCache.txt" | tr -d '\r')
+if [ -n "$XR_LOADER" ]; then
+    cp "$XR_LOADER" "$STAGE/libopenxr_loader.so"
+    rm -f "$STAGE/libvulkan.so"
+    echo "==> Quest: staged libopenxr_loader.so, dropped the Vulkan shim"
+fi
 # SDL is linked into libmain.so, so there is no libSDL3.so to stage; see tools/configure-android.sh.
 
 echo "==> ok: $STAGE"
