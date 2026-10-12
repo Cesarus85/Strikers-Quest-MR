@@ -14,7 +14,8 @@ APK.*
 
 ## What it is
 
-Four ways to watch the same match, switched any time with the controller sticks:
+Four ways to watch the same match, switched any time by clicking the controller sticks (see
+[Controls](#controls-quest-3-controllers)):
 
 - **Jumbotron · Living Room**: a big flat screen floating in your real room (passthrough), in three
   sizes. This is where the game starts.
@@ -88,10 +89,59 @@ be your own.
 4. **First time only:** pressing a button opens a settings screen. Turn on **"Allow access to manage
    all files"**, go back, and press the same button again.
 
-That's it. Next time, just do Step 5 (parts 2 and 3).
+That's it. Next time, just do Step 5 (parts 2 and 3). Now check the
+[Controls](#controls-quest-3-controllers) below to see how to switch to the tabletop and the
+stadium.
 
 **Updating:** download the new `.apk` from the Releases page and drag it onto SideQuest again (Step
 3). Your saves and your game file stay.
+
+## Controls (Quest 3 controllers)
+
+### Playing
+
+| Button | What it does |
+| --- | --- |
+| **Left stick** | Move |
+| **A** | Pass |
+| **B** | Shoot |
+| **X** | Use your item |
+| **Y** | Hit |
+| **Right grip** (squeeze) | Swap items |
+| **Left / right trigger** | The GameCube's L / R |
+| **Right stick** | The GameCube's C-stick |
+| **Menu button** (left controller, ☰) | Pause |
+
+### Switching views
+
+"Click" a stick means **press it straight down** like a button. Switching needs **two quick
+clicks**, so you can't do it by accident mid-match.
+
+| Do this | What happens |
+| --- | --- |
+| **Left stick: click twice fast** | Swap between **your room** (mixed reality, you see your real room) and **the stadium** (full VR, you're standing on the pitch) |
+| **Right stick: click twice fast** | Swap between the **big screen** and the **tabletop** (a mini 3D pitch you can walk around) |
+| **Right stick: click once** | Big screen: change its size (3 sizes) |
+| **Left stick: click once** | Tabletop: bring the table back in front of you |
+
+So there are four views, and you can mix them any way you like:
+
+| | Big screen | Tabletop |
+| --- | --- | --- |
+| **Your room** (MR) | Where the game starts: a giant screen floating in your room | The mini pitch on your real table, bed or floor |
+| **Stadium** (VR) | The screen, with you standing in the stadium | The mini pitch, with the whole stadium around you |
+
+### Moving the table (Tabletop)
+
+- **Grab it:** hold the **left grip** and move your hand. The table follows, up and down too. Let
+  go to drop it there.
+- **Make it bigger or smaller, or turn it:** keep holding the left grip and push the **left
+  stick** up/down to resize it and left/right to turn it.
+- **With both hands:** hold the left grip, put your right hand on the table and squeeze the
+  **right grip** too. Pull your hands apart or together to resize it, and twist them to turn it.
+- Lost the table? **Click the left stick once** and it comes back in front of you.
+
+A Bluetooth gamepad paired to the headset also works for offline play.
 
 ## Play online with a friend
 
@@ -153,41 +203,6 @@ More about online play:
   passes game messages along (button presses and team picks) and stores nothing. Like any web
   service, its host sees your IP address.
 
-## Controls
-
-The Touch controllers act as a GameCube pad:
-
-| Touch controller | Does |
-| --- | --- |
-| Left stick | Control stick (move) |
-| Right stick | C-stick |
-| A, B (right) | A (pass), B (shoot) |
-| X, Y (left) | X (use item), Y (hit) |
-| Left / right trigger | L / R |
-| Right grip | Z (swap items) |
-| Menu button (left) | Start (pause) |
-
-The stick clicks, the buttons a GameCube pad never had, change the view. Double taps, so a stray
-click in a match does nothing:
-
-| Stick click | Does |
-| --- | --- |
-| Double-tap the left stick | Living Room / Stadium |
-| Double-tap the right stick | Jumbotron / Tabletop |
-| Tap the right stick | Next screen size (Jumbotron) |
-| Tap the left stick | Bring the table in front of you (Tabletop) |
-
-Moving the table (Tabletop):
-
-- **Left grip**: grab the table from anywhere and carry it, up and down too. While you hold it with
-  the left hand alone, the left stick resizes it (up/down) and turns it (left/right).
-- **Both grips**: with the left grip held and the right hand squeezing on or right next to the
-  table, pull your hands apart or together to resize it, and turn them around each other to rotate
-  it.
-- The right grip on its own is still Z. It only grabs the table when the squeeze starts with your
-  hand on the table.
-
-A Bluetooth gamepad paired to the headset also works offline, alongside the Touch controllers.
 
 ## Known issues
 
