@@ -12,6 +12,11 @@ the Android phone port, with a Quest layer on top.
 *You need your own copy of the game. **No game files are included**, in this repository or in the
 APK.*
 
+### [⬇ Download the latest version](https://github.com/LanceSweatpants/Strikers-Quest-MR/releases/latest)
+
+On that page, under **Assets**, get the file ending in **`.apk`** (not "Source code"). Then follow
+[How to install](#how-to-install-easy-version).
+
 ## What it is
 
 Four ways to watch the same match, switched any time by clicking the controller sticks (see
@@ -72,7 +77,7 @@ be your own.
 
 **Step 3: Install the game app**
 1. Go to the [**Releases page**](../../releases/latest) and download the **`.apk`** file under
-   **Assets**.
+   **Assets**. (Not the "Source code" files: those aren't the app.)
 2. Drag that `.apk` file onto the SideQuest window. Wait until it says it's done.
 
 **Step 4: Put your game file on the headset**
@@ -158,9 +163,12 @@ Both of you need the **same version** of the app, and your own game files.
 
 ## If something goes wrong
 
-- **"It can't find my game":** make sure the `.iso` or `.rvz` file is in the headset's
-  **Download** folder (Step 4) and that it's Super Mario Strikers for GameCube. Keep only one
-  Strikers file in there.
+- **SideQuest says "there's no apk in that file":** you downloaded "Source code". On the
+  [Releases page](../../releases/latest), under **Assets**, download the file ending in **`.apk`**.
+- **The app closes right after you press Play offline** (or "it can't find my game"): your game
+  file isn't in the headset's **Download** folder, or it's still inside a `.zip`/`.7z`. Unzip it on
+  your PC and do Step 4 again with the `.iso` or `.rvz` itself. It must be Super Mario Strikers for
+  GameCube; keep only one Strikers file in there.
 - **The menu keeps asking for file access:** in the settings screen, make sure the switch is on for
   **Quest 3 Strikers**.
 - **The game closed:** open it again from Unknown Sources.
