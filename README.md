@@ -47,7 +47,10 @@ And around the game:
   goals.
 - **Online 1v1 with room codes**: one player hosts and reads out a four-letter code, the other types
   it in. Each player keeps their own view mode.
-- **Your disc image as it is**: `.iso`, `.gcm` (NKit too), `.ciso`, `.gcz` and Dolphin's `.rvz`.
+- **Your disc image as it is**: `.iso`, or Dolphin's `.rvz` and `.wia` with any compression. Pick
+  it with **Choose game file**, which also tells you if a file isn't the right game.
+- **Updates from inside the app**: when there's a new version, the first screen offers **Update
+  now**.
 
 ## Status
 
@@ -57,49 +60,48 @@ has tried it yet. Expect rough edges, and see [Known issues](#known-issues).
 
 ## How to install (easy version)
 
-**You need:** a Meta Quest 3, a PC, a USB-C cable, and your own copy of Super Mario Strikers
-(GameCube) as a file ending in **`.iso`** or **`.rvz`**. We can't give you the game file; it has to
-be your own.
+> **Already have it?** On alpha 1.2 or newer: open the app and press **Update now**.
+> On alpha 1 or 1.1: just do **Step 3** below, once.
 
-**Step 1: Turn on Developer Mode** (one time only)
+**You need:**
+- A **Meta Quest 3** and a **USB-C cable**
+- A **PC**
+- **Your own** Super Mario Strikers (GameCube) game file: **`.iso`**, **`.rvz`** or **`.wia`**
+
+### Step 1 · Developer Mode *(only once)*
 1. On your phone, open the **Meta Horizon** app.
-2. Tap **Devices**, pick your Quest, tap **Headset settings**, then **Developer mode**, and switch it
-   **on**. (If it asks you to make a free developer account first, do that, then come back.)
-3. Restart the headset.
+2. **Devices** → your Quest → **Headset settings** → **Developer mode** → **On**.
+   *(Asked to make a free developer account? Do it, then come back.)*
+3. Restart the Quest.
 
-**Step 2: Get SideQuest on your PC** (one time only)
-1. Go to [sidequestvr.com](https://sidequestvr.com/setup-howto) and download the free
-   **SideQuest Advanced Installer** for your PC. Install it and open it.
-2. Plug your Quest into the PC with the USB-C cable.
-3. Put the headset on. When it asks **"Allow USB debugging?"**, tick **Always allow from this
-   computer** and press **Allow**. Take the headset off.
-4. The dot at the top left of SideQuest turns **green**. That means you're connected.
+### Step 2 · SideQuest *(only once)*
+1. On your PC, install the free [**SideQuest Advanced Installer**](https://sidequestvr.com/setup-howto) and open it.
+2. Plug the Quest into the PC.
+3. Put the Quest on. At **"Allow USB debugging?"** tick **Always allow** and press **Allow**.
+4. The dot at the top left of SideQuest turns **green**. You're connected.
 
-**Step 3: Install the game app**
-1. Go to the [**Releases page**](../../releases/latest) and download the **`.apk`** file under
-   **Assets**. (Not the "Source code" files: those aren't the app.)
-2. Drag that `.apk` file onto the SideQuest window. Wait until it says it's done.
+### Step 3 · The app
+1. [**Download the `.apk`**](../../releases/latest): under **Assets**, the file ending in `.apk`.
+2. Drag it onto the SideQuest window. Wait until it says it's done.
 
-**Step 4: Put your game file on the headset**
-1. In SideQuest, click the **folder icon** at the top ("Manage files on the headset").
-2. Open the **Download** folder.
-3. Drag your `.iso` or `.rvz` file in. It's a big file, so give it a few minutes.
+### Step 4 · Your game file
+1. In SideQuest, click the **folder icon** at the top.
+2. Open **Download**.
+3. Drag your `.iso`, `.rvz` or `.wia` in. *(Zipped? Unzip it first.)*
 
-**Step 5: Play**
-1. Unplug the headset and put it on.
-2. Open your **Library**, click the menu at the top right that says **All**, and pick
-   **Unknown Sources**.
-3. Open **Quest 3 Strikers**. A small menu pops up: **Play offline**, **Host an online match** or
-   **Join with a code**.
-4. **First time only:** pressing a button opens a settings screen. Turn on **"Allow access to manage
-   all files"**, go back, and press the same button again.
+### Step 5 · Play
+1. Unplug the Quest and put it on.
+2. **Library** → **All** (top right) → **Unknown Sources** → **Quest 3 Strikers**.
+3. Press **Play offline**.
+4. **First time only:** turn on **"Allow access to manage all files"**, go back, and press
+   **Play offline** again.
 
-That's it. Next time, just do Step 5 (parts 2 and 3). Now check the
-[Controls](#controls-quest-3-controllers) below to see how to switch to the tabletop and the
-stadium.
+- **Game not found?** Press **Choose game file** and tap yours.
+- **Next time?** Just Step 5.
+- **New version out?** The app shows **Update now**. Press it, then **Install**. *(The first time,
+  allow the app to install updates.)* Your saves and game file stay.
 
-**Updating:** download the new `.apk` from the Releases page and drag it onto SideQuest again (Step
-3). Your saves and your game file stay.
+Now see [Controls](#controls-quest-3-controllers) to switch to the tabletop and the stadium.
 
 ## Controls (Quest 3 controllers)
 
@@ -165,17 +167,17 @@ Both of you need the **same version** of the app, and your own game files.
 
 - **SideQuest says "there's no apk in that file":** you downloaded "Source code". On the
   [Releases page](../../releases/latest), under **Assets**, download the file ending in **`.apk`**.
-- **The app closes right after you press Play offline** (or "it can't find my game"): your game
-  file isn't in the headset's **Download** folder, or it's still inside a `.zip`/`.7z`. Unzip it on
-  your PC and do Step 4 again with the `.iso` or `.rvz` itself. It must be Super Mario Strikers for
-  GameCube; keep only one Strikers file in there.
+- **"Your game file wasn't found" / the app closes when you press Play** (alpha 1.1 and older):
+  press **Choose game file**. It lists every `.iso`, `.rvz` and `.wia` on the headset and says what's
+  wrong with any it can't use. If the list is empty, your game file isn't on the headset yet, or
+  it's still inside a `.zip`/`.7z`: unzip it on your PC and do Step 4 again.
 - **The menu keeps asking for file access:** in the settings screen, make sure the switch is on for
   **Quest 3 Strikers**.
-- **The game closed:** open it again from Unknown Sources.
+- **The game closed:** open it again from Unknown Sources. If the game stopped because of a problem,
+  the first screen shows its message.
 - **Online, you ended up playing the computer:** back out to the main menu. Make sure you both
   used the same code, then both start Grudge Match again.
-- **A `.rvz` that won't open:** convert it to `.iso` with [Dolphin](https://dolphin-emu.org)
-  (right-click the game, **Convert File**, pick ISO).
+- **Still stuck?** [Report a bug](../../issues/new?template=bug_report.yml).
 
 <details>
 <summary>More detail: disc versions, file formats, where the game looks</summary>
@@ -183,13 +185,16 @@ Both of you need the **same version** of the app, and your own game files.
 - The US version (disc code `G4QE01`) is the tested one. The port also reads the European
   (`G4QP01`, sold as *Mario Smash Football*) and Japanese (`G4QJ01`) discs; those are untested on
   the headset.
-- Formats: `.iso`, `.gcm`, `.ciso`, `.gcz`, or `.rvz` made by Dolphin with its default zstd
-  compression (or none). `.wia`, and `.rvz` made with bzip2 or LZMA, are not readable; convert those
-  to `.iso` in Dolphin.
-- Where the game looks for the disc, in order: a folder called `Strikers` at the top of the
-  headset's storage (the game creates it, and keeps its settings and log there), then the top of
-  the storage itself, `Games/Strikers`, `ROMs/GameCube` and `Download`. If a folder holds several
-  GameCube disc images, the game takes the one whose name comes first alphabetically.
+- Formats: `.iso` (NKit too), and Dolphin's `.rvz` (zstd, bzip2, LZMA, LZMA2 or none) and `.wia`
+  (purge, bzip2, LZMA, LZMA2 or none). Older `.gcm`, `.ciso` and `.gcz` files are still read if the
+  game finds them by itself, but **Choose game file** lists only `.iso`, `.rvz` and `.wia`.
+- Where the game looks for the disc: the file picked with **Choose game file**. With none picked, in
+  order: a folder called `Strikers` at the top of the headset's storage (the game creates it, and
+  keeps its settings and log there), then the top of the storage itself, `Games/Strikers`,
+  `ROMs/GameCube` and `Download`. If a folder holds several GameCube disc images, the game takes the
+  one whose name comes first alphabetically.
+- The first screen asks GitHub once each time it opens whether there's a newer release (nothing
+  else is sent). Offline, it just doesn't show **Update now**.
 - Instead of SideQuest you can use `adb install` and `adb push`, or the headset's own USB file
   access (allow it inside the headset, and it shows up on the PC as a drive).
 - Hand tracking is not supported; use the Touch controllers.

@@ -236,6 +236,9 @@ file(GLOB_RECURSE PLATFORM_SOURCES CONFIGURE_DEPENDS
 # a Vulkan entry point.
 list(REMOVE_ITEM PLATFORM_SOURCES
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/vulkan_shim.c")
+# strikers-quest r41: its own library without the prelude (port_disc_codecs, below).
+list(REMOVE_ITEM PLATFORM_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/disc_codecs.c")
 
 # strikers-quest: src/platform/xr_quest.cpp is built on its own (strikers_xr, below): C++17 and
 # without the port prelude, which the Vulkan and OpenXR headers do not survive.
@@ -594,6 +597,33 @@ target_compile_definitions(strikers_platform PRIVATE STRIKERS_ZSTD=1)
 target_link_libraries(strikers_platform PRIVATE port_zstd)
 target_link_libraries(strikers PRIVATE port_zstd)
 message(STATUS "Disc images: also .rvz (zstd)")
+
+# strikers-quest r41: the other .rvz/.wia compressions, so any image Dolphin makes reads as it is.
+# LZMA and LZMA2 through the LZMA SDK's decoders (extern/lzma, public domain, as vendored by mGBA),
+# bzip2 through libbzip2 1.0.8 (extern/bzip2, Dolphin's Externals, its own BSD-style LICENSE).
+add_library(port_lzma STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/lzma/LzmaDec.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/lzma/Lzma2Dec.c")
+target_include_directories(port_lzma PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/extern/lzma")
+set_target_properties(port_lzma PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_library(port_bzip2 STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2/blocksort.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2/bzlib.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2/compress.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2/crctable.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2/decompress.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2/huffman.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2/randtable.c")
+target_include_directories(port_bzip2 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/extern/bzip2")
+set_target_properties(port_bzip2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# The calls disc.c makes into both, kept out of its translation unit (the LZMA SDK's types).
+add_library(port_disc_codecs STATIC "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/disc_codecs.c")
+target_link_libraries(port_disc_codecs PUBLIC port_lzma port_bzip2)
+set_target_properties(port_disc_codecs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_definitions(strikers_platform PRIVATE STRIKERS_LZMA_BZIP2=1)
+target_link_libraries(strikers_platform PRIVATE port_disc_codecs)
+target_link_libraries(strikers PRIVATE port_disc_codecs)
+message(STATUS "Disc images: also .rvz/.wia with LZMA, LZMA2, bzip2 or purge")
 
 # Dead-strip the debug classes (StatsGatherer, cFuzzyDebugger) whose vtables reference methods
 # defined only in files the decomp excludes, and which nothing ever constructs.

@@ -26,6 +26,26 @@ void port_fatal_notice(const char* title, const char* text)
     fprintf(stderr, "\n=== %s ===\n%s\n", title, text);
     fflush(stderr);
 
+#if defined(__ANDROID__)
+    // strikers-quest r41: on the Quest nobody sees a message box under the immersive game, which
+    // just closes. The launcher panel (LobbyActivity) shows this file the next time it opens.
+    {
+        const char* home = getenv("STRIKERS_HOME");
+        if (home != NULL && *home != '\0')
+        {
+            char path[1024];
+            FILE* f;
+            snprintf(path, sizeof path, "%s/last-error.txt", home);
+            f = fopen(path, "w");
+            if (f != NULL)
+            {
+                fprintf(f, "%s\n%s\n", title, text);
+                fclose(f);
+            }
+        }
+    }
+#endif
+
 #if defined(PORT_USE_AURORA)
     if (!messagebox_suppressed())
     {

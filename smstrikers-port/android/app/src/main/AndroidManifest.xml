@@ -43,6 +43,10 @@
         android:name="android.hardware.usb.host"
         android:required="false" />
 
+    <!-- strikers-quest r41: the launcher panel's "Update now" hands a newer release, downloaded from
+         the project's GitHub page, to the system installer (Updater.java). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Rumble, which the game asks PAD for and Aurora forwards to the device's vibrator. -->
     <uses-permission android:name="android.permission.VIBRATE" />
 

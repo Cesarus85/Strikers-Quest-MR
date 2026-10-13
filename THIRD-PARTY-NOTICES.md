@@ -13,9 +13,9 @@ Notes:
   file. They have their own license files in `smstrikers-port/`: `LICENSE-CC0.txt`,
   `LICENSE-BSD.TXT`, `LICENSE-LGPL-2.1.txt` and `LICENSE-GPL-2.0.txt` (see also the License section
   of `README.md`).
-- **RVZ disc reader.** The RVZ disc-image reader in `smstrikers-port/src/platform/disc.c` follows
-  the code of the Dolphin emulator (https://github.com/dolphin-emu/dolphin) and is therefore under
-  GPL-2.0-or-later. The license text is `smstrikers-port/LICENSE-GPL-2.0.txt`.
+- **RVZ/WIA disc reader.** The RVZ and WIA disc-image reader in `smstrikers-port/src/platform/disc.c`
+  follows the code of the Dolphin emulator (https://github.com/dolphin-emu/dolphin) and is therefore
+  under GPL-2.0-or-later. The license text is `smstrikers-port/LICENSE-GPL-2.0.txt`.
 - **Button prompts.** The button prompt images in the APK (`assets/input-prompts/kenney/`) are
   Kenney's "Input Prompts" pack, released under CC0 1.0 (public domain dedication). Its license
   file ships next to them in the APK as `assets/input-prompts/LICENSE-Kenney.txt`.
@@ -30,7 +30,7 @@ Notes:
 
 | APK path | What it is | Third-party content |
 | --- | --- | --- |
-| `lib/arm64-v8a/libmain.so` | The game, the port and its engine | Aurora (incl. magic_enum, libogc-derived code), MusyX, zstd, ODE, SDL 3, Dawn (incl. Tint, Abseil, SPIRV-Tools, SPIR-V grammar, webgpu.h), Abseil, {fmt}, xxHash, libpng, FreeType, Dear ImGui (incl. ProggyClean font, stb), SQLite, LLVM runtime pieces |
+| `lib/arm64-v8a/libmain.so` | The game, the port and its engine | Aurora (incl. magic_enum, libogc-derived code), MusyX, zstd, bzip2, LZMA SDK, ODE, SDL 3, Dawn (incl. Tint, Abseil, SPIRV-Tools, SPIR-V grammar, webgpu.h), Abseil, {fmt}, xxHash, libpng, FreeType, Dear ImGui (incl. ProggyClean font, stb), SQLite, LLVM runtime pieces |
 | `lib/arm64-v8a/libc++_shared.so` | C++ standard library | LLVM libc++ / libc++abi (from Android NDK r29) |
 | `lib/arm64-v8a/libopenxr_loader.so` | OpenXR loader | Khronos OpenXR loader 1.1.63 (incl. jsoncpp, jnipp, android-jni-wrappers, LLVM libc++) |
 | `lib/arm64-v8a/libmain_hook.so`, `libfile_redirect_hook.so`, `libgsl_alloc_hook.so`, `libhook_impl.so` | GPU driver loading hooks | libadrenotools (incl. liblinkernsbypass) |
@@ -46,6 +46,8 @@ Notes:
 | libogc-derived code (bundled in Aurora) | - | zlib | https://github.com/devkitPro/libogc |
 | MusyX | vendored in `smstrikers-port/extern/musyx` | MIT | https://github.com/AxioDL/musyx |
 | Zstandard (zstd), decompression only | 1.5.8 | BSD-3-Clause (chosen from BSD / GPLv2) | https://github.com/facebook/zstd |
+| bzip2 / libbzip2 | 1.0.8 | bzip2 BSD-style license | https://sourceware.org/bzip2/ |
+| LZMA SDK (LzmaDec, Lzma2Dec) | 19.00 (decoder sources, as vendored by mGBA) | Public domain | https://www.7-zip.org/sdk.html |
 | Open Dynamics Engine (ODE) | 0.5, with reconstructed changes | ODE BSD-style license (chosen from BSD / LGPL-2.1) | https://www.ode.org |
 | SDL (native library and Java glue) | 3.4.10 | zlib | https://github.com/libsdl-org/SDL |
 | yuv2rgb (bundled in SDL) | - | BSD-3-Clause | https://github.com/descampsa/yuv2rgb |
@@ -104,6 +106,14 @@ Notes:
 - Copyright (c) 2016 Tino Reichardt
 - Upstream: https://github.com/facebook/zstd. Version 1.5.8, decompression sources only, vendored in
   `smstrikers-port/extern/zstd`.
+
+### bzip2 / libbzip2
+
+- License: bzip2's BSD-style license (text: [bzip2 License](#bzip2-license)).
+- Copyright (C) 1996-2019 Julian R Seward.
+- Upstream: https://sourceware.org/bzip2/. Version 1.0.8, the library sources only, vendored
+  unmodified in `smstrikers-port/extern/bzip2` (from Dolphin's Externals). Used to read .rvz/.wia
+  disc images made with bzip2 compression.
 
 ### Open Dynamics Engine (ODE)
 
@@ -302,6 +312,9 @@ These are in the APK but need no notice; they are listed for completeness.
 - **Dolphin's LaggedFibonacciGenerator** (CC0), followed by the RVZ reader in
   `smstrikers-port/src/platform/disc.c` (the rest of that RVZ section is GPL-2.0-or-later, see the
   notes at the top).
+- **LZMA SDK** (Igor Pavlov; `LzmaDec.c`, `Lzma2Dec.c` and their headers, in
+  `smstrikers-port/extern/lzma`, unmodified, from mGBA's copy): public domain. Reads .rvz/.wia disc
+  images made with LZMA or LZMA2 compression. https://www.7-zip.org/sdk.html
 - **Kenney Input Prompts** 1.5A: CC0 1.0.
 
 ---
@@ -483,6 +496,50 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### bzip2 License
+
+Applies to bzip2 / libbzip2 1.0.8.
+
+```
+This program, "bzip2", the associated library "libbzip2", and all
+documentation, are copyright (C) 1996-2019 Julian R Seward.  All
+rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. The origin of this software must not be misrepresented; you must
+   not claim that you wrote the original software.  If you use this
+   software in a product, an acknowledgment in the product
+   documentation would be appreciated but is not required.
+
+3. Altered source versions must be plainly marked as such, and must
+   not be misrepresented as being the original software.
+
+4. The name of the author may not be used to endorse or promote
+   products derived from this software without specific prior written
+   permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
+OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Julian Seward, jseward@acm.org
+bzip2/libbzip2 version 1.0.8 of 13 July 2019
 ```
 
 ### yuv2rgb BSD License

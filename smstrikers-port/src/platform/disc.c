@@ -390,12 +390,32 @@ typedef struct
     unsigned char compressed;
 } RvzGroup;
 
+#ifdef STRIKERS_LZMA_BZIP2
+// src/platform/disc_codecs.c (r41).
+long port_disc_unlzma(const unsigned char* props, size_t propsLen, int lzma2, const unsigned char* in,
+                      size_t inLen, unsigned char* out, size_t outCap);
+long port_disc_unbzip2(const unsigned char* in, size_t inLen, unsigned char* out, size_t outCap);
+#endif
+
+enum
+{
+    WIA_NONE = 0,
+    WIA_PURGE = 1, // .wia only
+    WIA_BZIP2 = 2,
+    WIA_LZMA = 3,
+    WIA_LZMA2 = 4,
+    WIA_ZSTD = 5,  // .rvz only
+};
+
 struct Rvz
 {
     unsigned char discHeader[0x80];
     uint64_t isoSize;
     uint32_t chunkSize;
-    uint32_t compression;   // 0 none, 5 zstd
+    uint32_t compression;   // WIA_*
+    unsigned char isWia;    // r41: .wia, the older format (8-byte group entries, no packing)
+    unsigned char comprData[7]; // the LZMA properties (5 bytes) or LZMA2 dictionary byte
+    unsigned comprLen;
     RvzRaw* raw;
     unsigned rawCount;
     RvzGroup* group;
@@ -491,26 +511,62 @@ static void lfg_bytes(struct Rvz* r, unsigned char* out, size_t n)
     }
 }
 
-// Stored bytes into `out`: zstd-decompressed, or copied when stored as is. Bytes produced, or -1.
+// .wia's purge: runs of real bytes at given offsets, zeroes between them, a SHA-1 at the end (not
+// checked here). Fills all of `out`. Bytes produced, or -1.
+static long wia_unpurge(const unsigned char* in, size_t inLen, unsigned char* out, size_t outCap)
+{
+    size_t pos = 0, end;
+    if (inLen < 20)
+        return -1;
+    end = inLen - 20;
+    memset(out, 0, outCap);
+    while (pos + 8 <= end)
+    {
+        const uint32_t at = rd_be32(in + pos);
+        const uint32_t n = rd_be32(in + pos + 4);
+        pos += 8;
+        if (n > end - pos || at > outCap || n > outCap - at)
+            return -1;
+        memcpy(out + at, in + pos, n);
+        pos += n;
+    }
+    return (long)outCap;
+}
+
+// Stored bytes into `out`: decompressed with the image's method, or copied when stored as is.
+// Bytes produced, or -1.
 static long rvz_unpack_bytes(struct Rvz* r, const unsigned char* in, size_t inLen, unsigned char* out,
                              size_t outCap, int compressed)
 {
-    if (!compressed)
+    if (!compressed || r->compression == WIA_NONE)
     {
         if (inLen > outCap)
             inLen = outCap;
         memcpy(out, in, inLen);
         return (long)inLen;
     }
+    switch (r->compression)
+    {
+    case WIA_PURGE:
+        return wia_unpurge(in, inLen, out, outCap);
+#ifdef STRIKERS_LZMA_BZIP2
+    case WIA_BZIP2:
+        return port_disc_unbzip2(in, inLen, out, outCap);
+    case WIA_LZMA:
+    case WIA_LZMA2:
+        return port_disc_unlzma(r->comprData, r->comprLen, r->compression == WIA_LZMA2, in, inLen, out,
+                                outCap);
+#endif
 #ifdef STRIKERS_ZSTD
+    case WIA_ZSTD:
     {
         const size_t got = ZSTD_decompressDCtx(r->dctx, out, outCap, in, inLen);
         return ZSTD_isError(got) ? -1 : (long)got;
     }
-#else
-    (void)r;
-    return -1;
 #endif
+    default:
+        return -1;
+    }
 }
 
 static int rvz_grow(unsigned char** buf, size_t* cap, size_t want)
@@ -655,34 +711,45 @@ static PortDisc* rvz_open(PortDisc* d, char* err, size_t errsize)
 
     memset(h2, 0, sizeof h2);
     if (disc_seek(d->f, 0) != 0 || fread(h1, 1, sizeof h1, d->f) != sizeof h1)
-        return fail(d, err, errsize, "That .rvz file ends inside its header.");
+        return fail(d, err, errsize, "That .rvz/.wia file ends inside its header.");
     h2size = rd_be32(h1 + 0x0C);
     if (h2size < sizeof h2 - 7 || h2size > 0x10000)
-        return fail(d, err, errsize, "That .rvz file's header does not make sense; it may be damaged.");
+        return fail(d, err, errsize, "That .rvz/.wia file's header does not make sense; it may be damaged.");
     if (fread(h2, 1, h2size < sizeof h2 ? h2size : sizeof h2, d->f) == 0)
-        return fail(d, err, errsize, "That .rvz file ends inside its header.");
+        return fail(d, err, errsize, "That .rvz/.wia file ends inside its header.");
 
     r = (struct Rvz*)calloc(1, sizeof *r);
     if (r == NULL)
         return fail(d, err, errsize, "Out of memory.");
     d->rvz = r;
     d->kind = DISC_RVZ;
-    d->name = "RVZ";
+    // r41: .wia is the same layout with 8-byte group entries, no packing, purge and no zstd.
+    r->isWia = memcmp(h1, "WIA\x01", 4) == 0;
+    d->name = r->isWia ? "WIA" : "RVZ";
     r->isoSize = rd_be64(h1 + 0x24);
     r->compression = rd_be32(h2 + 0x04);
     r->chunkSize = rd_be32(h2 + 0x0C);
     memcpy(r->discHeader, h2 + 0x10, sizeof r->discHeader);
+    r->comprLen = h2[0xD4] <= sizeof r->comprData ? h2[0xD4] : (unsigned)sizeof r->comprData;
+    memcpy(r->comprData, h2 + 0xD5, sizeof r->comprData);
 
     if (rd_be32(h2 + 0x00) != 1 || rd_be32(h2 + 0x90) != 0)
         return fail(d, err, errsize,
-                    "That .rvz holds a Wii disc. Super Mario Strikers is a GameCube game; its disc\n"
+                    "That .rvz/.wia holds a Wii disc. Super Mario Strikers is a GameCube game; its disc\n"
                     "has a code beginning G4Q.");
-    if (r->compression != 0 && r->compression != 5)
-        return fail(d, err, errsize,
-                    "That .rvz was made with bzip2 or LZMA compression, and this reads Dolphin's\n"
-                    "default, zstd. Convert it again with zstd, or to a plain .iso.");
+    {
+        const uint32_t c = r->compression;
+        int ok = c == WIA_NONE || c == (r->isWia ? WIA_PURGE : WIA_ZSTD);
+#ifdef STRIKERS_LZMA_BZIP2
+        ok = ok || c == WIA_BZIP2 || c == WIA_LZMA || c == WIA_LZMA2;
+#endif
+        if (!ok)
+            return fail(d, err, errsize,
+                        "That .rvz/.wia uses a compression this game cannot read. Convert it to a plain\n"
+                        ".iso (Dolphin: right-click the game, Convert File Format).");
+    }
     if (r->chunkSize < RVZ_BLOCK || r->chunkSize > (32u << 20) || r->chunkSize % RVZ_BLOCK != 0)
-        return fail(d, err, errsize, "That .rvz file's block size is not one this can read.");
+        return fail(d, err, errsize, "That .rvz/.wia file's block size is not one this can read.");
 
     r->dctx = ZSTD_createDCtx();
     if (r->dctx == NULL)
@@ -703,7 +770,7 @@ static PortDisc* rvz_open(PortDisc* d, char* err, size_t errsize)
     if (table == NULL || r->raw == NULL || rvz_table(d, rawAt, rawSize, table, (size_t)nRaw * 24) != 0)
     {
         free(table);
-        return fail(d, err, errsize, "That .rvz file's tables could not be read; it may be damaged.");
+        return fail(d, err, errsize, "That .rvz/.wia file's tables could not be read; it may be damaged.");
     }
     r->rawCount = nRaw;
     for (i = 0; i < nRaw; i++)
@@ -716,26 +783,39 @@ static PortDisc* rvz_open(PortDisc* d, char* err, size_t errsize)
     }
     free(table);
 
-    // The group entries: where each group sits in the file, and how it is stored.
-    table = (unsigned char*)malloc((size_t)nGroups * 12);
-    r->group = (RvzGroup*)calloc(nGroups, sizeof *r->group);
-    if (table == NULL || r->group == NULL
-        || rvz_table(d, groupAt, groupSize, table, (size_t)nGroups * 12) != 0)
+    // The group entries: where each group sits in the file, and how it is stored. .wia's have no
+    // per-group flag (every group uses the image's compression) and no packed size.
     {
+        const size_t entry = r->isWia ? 8 : 12;
+        table = (unsigned char*)malloc((size_t)nGroups * entry);
+        r->group = (RvzGroup*)calloc(nGroups, sizeof *r->group);
+        if (table == NULL || r->group == NULL
+            || rvz_table(d, groupAt, groupSize, table, (size_t)nGroups * entry) != 0)
+        {
+            free(table);
+            return fail(d, err, errsize, "That .rvz/.wia file's tables could not be read; it may be damaged.");
+        }
+        r->groupCount = nGroups;
+        for (i = 0; i < nGroups; i++)
+        {
+            const unsigned char* p = table + (size_t)i * entry;
+            const uint32_t size = rd_be32(p + 4);
+            r->group[i].fileOffset = (uint64_t)rd_be32(p) << 2;
+            if (r->isWia)
+            {
+                r->group[i].size = size;
+                r->group[i].compressed = r->compression != WIA_NONE;
+                r->group[i].packed = 0;
+            }
+            else
+            {
+                r->group[i].size = size & 0x7FFFFFFFu;
+                r->group[i].compressed = (size & 0x80000000u) != 0 && r->compression != WIA_NONE;
+                r->group[i].packed = rd_be32(p + 8);
+            }
+        }
         free(table);
-        return fail(d, err, errsize, "That .rvz file's tables could not be read; it may be damaged.");
     }
-    r->groupCount = nGroups;
-    for (i = 0; i < nGroups; i++)
-    {
-        const unsigned char* p = table + (size_t)i * 12;
-        const uint32_t size = rd_be32(p + 4);
-        r->group[i].fileOffset = (uint64_t)rd_be32(p) << 2;
-        r->group[i].size = size & 0x7FFFFFFFu;
-        r->group[i].compressed = (size & 0x80000000u) != 0 && r->compression != 0;
-        r->group[i].packed = rd_be32(p + 8);
-    }
-    free(table);
 
     // How much disc each group holds: a whole chunk, less for a run's last one. A run starts on
     // a 0x8000 boundary (the bytes before its first offset come along).
@@ -1020,29 +1100,22 @@ PortDisc* port_disc_open(const char* path, char* err, size_t errsize)
         return fail(d, err, errsize,
                     "That file is too small to be a disc image.");
 
-    // strikers-quest: Dolphin's .rvz (zstd), read as it is.
-    if (memcmp(head, "RVZ\x01", 4) == 0)
+    // strikers-quest: Dolphin's .rvz, and (r41) its older .wia, read as they are.
+    if (memcmp(head, "RVZ\x01", 4) == 0 || memcmp(head, "WIA\x01", 4) == 0)
     {
         d = rvz_open(d, err, errsize);
         if (d == NULL)
             return NULL;
         if (port_disc_read(d, head, sizeof head, 0) < 0x204)
             return fail(d, err, errsize,
-                        "That .rvz could not be read past its own header, it is "
+                        "That .rvz/.wia could not be read past its own header, it is "
                         "truncated or damaged.");
         if (rd_be32(head + 0x1C) != GC_MAGIC)
             return fail(d, err, errsize,
-                        "That .rvz decompresses to something that is not a GameCube "
+                        "That .rvz/.wia decompresses to something that is not a GameCube "
                         "disc. It is either damaged or an image of something else.");
         return d;
     }
-
-    // The format that is recognisable and cannot be read.
-    if (memcmp(head, "WIA\x01", 4) == 0)
-        return fail(d, err, errsize,
-                    "That is a .wia disc image, which this port cannot read.\n\n"
-                    "Convert it to a plain .iso first. In Dolphin: right-click the "
-                    "game, Convert File\nFormat..., and set Format to ISO.");
 
     if (rd_be32(head + 0x1C) == GC_MAGIC)
     {

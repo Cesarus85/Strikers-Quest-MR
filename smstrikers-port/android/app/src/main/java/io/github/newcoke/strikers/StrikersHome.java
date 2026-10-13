@@ -166,8 +166,12 @@ final class StrikersHome {
         // Only when it is somewhere the native search cannot reach on its own. Left unset, DVDInit
         // finds a files/ folder or a disc image in the home directory itself and reports what it
         // tried, which is a better message than anything passed in from here.
-        String elsewhere = findInPublicFolders();
-        if (!hasGameDataInHome(home) && elsewhere != null) {
+        // strikers-quest r41: the file picked in the launcher panel comes first.
+        String chosen = GameFile.chosen(context);
+        String elsewhere = chosen != null ? null : findInPublicFolders();
+        if (chosen != null) {
+            setenv("STRIKERS_DATA", chosen);
+        } else if (!hasGameDataInHome(home) && elsewhere != null) {
             setenv("STRIKERS_DATA", elsewhere);
         }
 
@@ -252,11 +256,16 @@ final class StrikersHome {
 
     /** Whether the game would find its data, without doing anything about it. */
     static boolean hasGameData(Context context) {
-        return hasGameDataInHome(homeDir(context)) || findInPublicFolders() != null;
+        return GameFile.chosen(context) != null || hasGameDataInHome(homeDir(context))
+                || findInPublicFolders() != null;
     }
 
     /** What the game will read, for the setup screen to show. Null when there is nothing. */
     static String describeGameData(Context context) {
+        String chosen = GameFile.chosen(context);  // strikers-quest r41
+        if (chosen != null) {
+            return chosen;
+        }
         File home = homeDir(context);
         File extracted = new File(home, "files");
         if (new File(extracted, "common.ini").exists()) {
@@ -269,7 +278,7 @@ final class StrikersHome {
         return findInPublicFolders();
     }
 
-    private static boolean hasGameDataInHome(File home) {
+    static boolean hasGameDataInHome(File home) {
         return new File(home, "files/common.ini").exists() || firstDiscImage(home) != null;
     }
 
@@ -437,7 +446,8 @@ final class StrikersHome {
             String name = entry.getName().toLowerCase(Locale.ROOT);
             if (!name.endsWith(".iso") && !name.endsWith(".gcm")
                     && !name.endsWith(".ciso") && !name.endsWith(".gcz")
-                    && !name.endsWith(".rvz")) {  // strikers-quest: Dolphin's .rvz too
+                    && !name.endsWith(".rvz")       // strikers-quest: Dolphin's .rvz too
+                    && !name.endsWith(".wia")) {    // and (r41) its .wia
                 continue;
             }
             // Lowest name wins, the same rule src/platform/dvd.c uses, so the two agree on which of
