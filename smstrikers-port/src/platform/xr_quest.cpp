@@ -357,6 +357,13 @@ struct State {
   bool celebBuzz = false;             // this goal is the player's: buzz with the cannon waves
   bool testWipe = false;              // self-test: Game.cpp plays the white-flash wipe once
   bool testItem = false;              // self-test: Game.cpp gives your team a green shell
+  bool testSts = false;               // self-test: Game.cpp shows the Super Strike meter for 3 s
+  struct {
+    bool shown = false;               // the Super Strike meter is up in live play (PortXrSetStsMeter)
+    bool logged = false;              // its Tabletop panel was logged for this Super Strike
+    float game[3] = {0.0f, 0.0f, 0.0f};  // where the game hangs it, game units
+    float halfU = 0.1f, halfV = 0.2f;    // its square in the middle of the picture
+  } sts;
   float charScale = 1.5f;             // Tabletop: players drawn this much bigger (xr_tune "charscale")
   int msaaTable = 4;                  // eye-pass multisampling, table only / with the stadium layer
   int msaaStadium = 4;                // (1 or 4; xr_tune "msaa <table> <stadium>")
@@ -1529,6 +1536,14 @@ M4 stadium_model() {
 
 M4 table_model() { return m4_game_to_room(g.table.scale, g.table.yaw, g.table.position); }
 
+// A game point on the Tabletop field, in LOCAL space.
+XrVector3f table_point(float gx, float gy, float gz) {
+  const M4 t = table_model();
+  return XrVector3f{gx * t.m[0][0] + gy * t.m[1][0] + gz * t.m[2][0] + t.m[3][0],
+                    gx * t.m[0][1] + gy * t.m[1][1] + gz * t.m[2][1] + t.m[3][1],
+                    gx * t.m[0][2] + gy * t.m[1][2] + gz * t.m[2][2] + t.m[3][2]};
+}
+
 uint32_t find_device_local(uint32_t typeBits) {
   for (uint32_t i = 0; i < g.memProps.memoryTypeCount; ++i) {
     if ((typeBits & (1u << i)) != 0 && (g.memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
@@ -2046,6 +2061,9 @@ void poll_triggers() {
         g.testWipe = true;
         ensure_fx();
         if (g.fxReady) xrfx::dump_at_flash();
+      } else if (c.rfind("sts", 0) == 0) {
+        // The Super Strike meter over the player you control for 3 s, no shot taken.
+        g.testSts = true;
       }
     }
   }
@@ -2608,6 +2626,26 @@ extern "C" int PortXrTakeTestItem(void) {
   return take ? 1 : 0;
 }
 
+// Self-test (xr_fx "sts"): Game.cpp shows the Super Strike meter once.
+extern "C" int PortXrTakeTestSts(void) {
+  const bool take = g.testSts;
+  g.testSts = false;
+  return take ? 1 : 0;
+}
+
+extern "C" void PortXrSetStsMeter(int shown, float x, float y, float z, float halfU, float halfV) {
+  g.sts.shown = shown != 0;
+  if (!g.sts.shown) {
+    g.sts.logged = false;
+    return;
+  }
+  g.sts.game[0] = x;
+  g.sts.game[1] = y;
+  g.sts.game[2] = z;
+  g.sts.halfU = std::min(0.5f, std::max(0.01f, halfU));
+  g.sts.halfV = std::min(0.5f, std::max(0.01f, halfV));
+}
+
 // Fielder.cpp UseTeamPowerup: the game took an item press (for the item check).
 extern "C" void PortXrNoteItemUse(int current, int next, int blocked) {
   XLOG("item: use, current %d, next %d%s", current, next, blocked ? " (blocked)" : "");
@@ -3000,7 +3038,40 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
         // The scoreboard: the broadcast view (score, time, replays) hanging over the field.
         const float half = 0.5f * g.table.yaw;
         quad.pose.orientation = {0.0f, std::sin(half), 0.0f, std::cos(half)};
-        if (PortXrHudOnlyNormalView()) {
+        if (PortXrHudOnlyNormalView() && g.sts.shown) {
+          // The Super Strike meter (Lance, alpha 1: the score-bar crop below cut it off, so the
+          // timing presses had nothing to aim at). ShootToScoreMeter.cpp draws it in the middle of
+          // the HUD-only picture; that square hangs over the captain, turned to you, while it is up.
+          const int32_t hw = std::max(1, static_cast<int32_t>(g.swapchainWidth * g.sts.halfU));
+          const int32_t hh = std::max(1, static_cast<int32_t>(g.swapchainHeight * g.sts.halfV));
+          quad.subImage.imageRect.offset = {static_cast<int32_t>(g.swapchainWidth / 2) - hw,
+                                            static_cast<int32_t>(g.swapchainHeight / 2) - hh};
+          quad.subImage.imageRect.extent = {2 * hw, 2 * hh};
+          // Readable at any table size; 8 game units (about a fifth of the field's width) by default.
+          const float width = std::min(0.5f, std::max(0.2f, 8.0f * g.table.scale));
+          const float height = width * static_cast<float>(hh) / static_cast<float>(hw);
+          // Its bottom edge above the "that's you" arrow over the captain's head.
+          XrVector3f anchor =
+              table_point(g.sts.game[0], g.sts.game[1], g.sts.game[2] + 4.5f * PortXrCharacterScale());
+          anchor.y += 0.5f * height;
+          XrVector3f head = g.views[0].pose.position;
+          if (sceneViews) {
+            head = XrVector3f{0.5f * (scene.views[0].pose.position.x + scene.views[1].pose.position.x),
+                              0.5f * (scene.views[0].pose.position.y + scene.views[1].pose.position.y),
+                              0.5f * (scene.views[0].pose.position.z + scene.views[1].pose.position.z)};
+          }
+          const float yaw = std::atan2(head.x - anchor.x, head.z - anchor.z);  // +Z of the quad toward you
+          quad.pose.orientation = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
+          quad.pose.position = anchor;
+          quad.size.width = width;
+          quad.size.height = height;
+          if (!g.sts.logged) {
+            g.sts.logged = true;
+            XLOG("super strike meter: panel (%.2f, %.2f, %.2f), %.2f x %.2f m, picture %dx%d at (%d, %d)",
+                 anchor.x, anchor.y, anchor.z, width, height, 2 * hw, 2 * hh,
+                 quad.subImage.imageRect.offset.x, quad.subImage.imageRect.offset.y);
+          }
+        } else if (PortXrHudOnlyNormalView()) {
           // Live play draws the HUD alone (glPlat.cpp): show just its score bar (names, score,
           // clock, items), a ribbon board over the field, instead of a mostly black screen.
           const int32_t x0 = static_cast<int32_t>(g.swapchainWidth * 0.13f);
@@ -3131,6 +3202,8 @@ extern "C" void PortXrSetPlayerMarker(int, float, float, float, int) {}
 extern "C" int PortXrScreenFlash(float, float, float, float) { return 0; }
 extern "C" int PortXrTakeTestWipe(void) { return 0; }
 extern "C" int PortXrTakeTestItem(void) { return 0; }
+extern "C" void PortXrSetStsMeter(int, float, float, float, float, float) {}
+extern "C" int PortXrTakeTestSts(void) { return 0; }
 extern "C" void PortXrNoteItemUse(int, int, int) {}
 extern "C" void PortXrLog(const char*) {}
 extern "C" float PortXrCharacterScale(void) { return 1.0f; }

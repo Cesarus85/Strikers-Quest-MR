@@ -5,6 +5,7 @@
 #include "NL/gl/glDraw3.h"
 #include "NL/gl/glState.h"
 #include "NL/platvmath.h"
+#include "port/xr_quest.h" // strikers-quest: the meter in Tabletop
 
 static u32 UnlitProgram = glGetProgram("3d unlit");
 static u32 LitProgram = glGetProgram("3d pointlit");
@@ -201,12 +202,29 @@ void ShootToScoreMeter::DrawMeter()
         glViewProjectPoint(GLV_Unshadowed, m_v3MeterPosition, screenPosition);
 
         NDCToScreenCoordinates(screenPosition, screenPosition);
-        screenPosition.y += -20.0f;
+
+        // strikers-quest: in Tabletop the small screen shows only a crop of this picture during
+        // play, so the meter goes to the middle, where xr_quest.cpp cuts it out and hangs it over
+        // the captain (Lance, alpha 1: no meter). A defender's shake still moves it.
+        const bool xrCentred = PortXrHudOnlyNormalView() != 0;
+        if (xrCentred)
+        {
+            nlVector3 original;
+            glViewProjectPoint(GLV_Unshadowed, m_v3OriginalMeterPosition, original);
+            NDCToScreenCoordinates(original, original);
+            screenPosition.x = 0.5f * glGetOrthographicWidth() + clamp_le(clamp_ge(screenPosition.x - original.x, -24.0f), 24.0f);
+            screenPosition.y = 0.5f * glGetOrthographicHeight() + clamp_le(clamp_ge(screenPosition.y - original.y, -24.0f), 24.0f);
+        }
+        else
+        {
+            screenPosition.y += -20.0f;
+        }
 
         scale = 640.0f;
         scaledMeterWidth = MeterWidth * scale;
 
         // PORT: 92 and 548 are 320 -/+ 228; 84 and 396 are 240 -/+ 156.
+        if (!xrCentred)
         {
             const float cx = 0.5f * glGetOrthographicWidth();
             const float cy = 0.5f * glGetOrthographicHeight();

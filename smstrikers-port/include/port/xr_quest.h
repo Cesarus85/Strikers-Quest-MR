@@ -58,6 +58,14 @@ int PortXrScreenFlash(float r, float g, float b, float a);
 int PortXrTakeTestWipe(void);
 /* Self-test (xr_fx "item"): 1 once when PortCelebrationPoll should give your team a green shell. */
 int PortXrTakeTestItem(void);
+/* PortCelebrationPoll, every game frame: the Super Strike meter (ShootToScoreMeter). shown = 1
+ * while it is up in live play; (x, y, z) = where the game hangs it (game units, by the captain);
+ * halfU/halfV = half the square it takes in the middle of the picture, as fractions of the
+ * picture's width/height (ShootToScoreMeter.cpp centres it there while PortXrHudOnlyNormalView).
+ * In Tabletop the scoreboard shows that square over the captain instead of the score bar. */
+void PortXrSetStsMeter(int shown, float x, float y, float z, float halfU, float halfV);
+/* Self-test (xr_fx "sts"): 1 once when PortCelebrationPoll should show the meter for 3 s. */
+int PortXrTakeTestSts(void);
 /* Fielder.cpp UseTeamPowerup, for the log: the team's items (ePowerUpType) and whether the
  * player's state refused it. */
 void PortXrNoteItemUse(int current, int next, int blocked);

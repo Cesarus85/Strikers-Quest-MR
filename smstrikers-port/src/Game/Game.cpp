@@ -33,6 +33,9 @@ extern cBall* g_pBall;
 #include "port/overlay.h"
 #include "port/xr_quest.h" // strikers-quest: goal celebrations
 #include "Game/Render/Wiper.h" // strikers-quest: the self-test's flash wipe
+#include "Game/Render/ShootToScoreMeter.h" // strikers-quest: the Super Strike meter in Tabletop
+#include "Game/GameTweaks.h"
+#include "NL/gl/gl.h"
 #include "port/xr_net.h"       // strikers-quest: online 1v1
 #include "NL/nlTask.h"
 #include <string.h>
@@ -625,6 +628,35 @@ extern "C" void PortCelebrationPoll(void)
         }
     }
     PortXrSetPlayerMarker(markerShown, markerPos[0], markerPos[1], markerPos[2], markerTeamCaptain);
+
+    // Self-test (xr_fx "sts"): the Super Strike meter over the player you control for 3 s (180
+    // game frames), its white bar sweeping once, no shot taken.
+    static int s_testStsFrames = 0;
+    ShootToScoreMeter& sts = ShootToScoreMeter::instance;
+    if (PortXrTakeTestSts() && markerShown)
+    {
+        sts.m_v3OriginalMeterPosition.x = markerPos[0];
+        sts.m_v3OriginalMeterPosition.y = markerPos[1];
+        sts.m_v3OriginalMeterPosition.z = markerPos[2] + 1.5f;
+        sts.m_v3MeterPosition = sts.m_v3OriginalMeterPosition;
+        sts.TurnOnMeter(ShootToScoreMeter::REGULAR_SHOOT_TO_SCORE_PHASE1, g_pGame->m_pGameTweaks->fShootToScoreYellowDistance);
+        s_testStsFrames = 180;
+    }
+    if (s_testStsFrames > 0)
+    {
+        sts.SetWhiteBarPosition(1.0f - (float)s_testStsFrames / 180.0f);
+        if (--s_testStsFrames == 0)
+            sts.m_bMeterVisible = false;
+    }
+
+    // The Super Strike meter for the headset (Lance, alpha 1: no meter in Tabletop). There
+    // ShootToScoreMeter.cpp draws it in the middle of the picture: its bars reach 63 (of 480 high)
+    // from the centre and a defender's shake moves it up to 24 more, so a 96 half-square holds it.
+    const float kStsHalf = 96.0f;
+    PortXrSetStsMeter(taskState == 2 && g_pGame != NULL && sts.m_bMeterVisible ? 1 : 0,
+                      sts.m_v3OriginalMeterPosition.x, sts.m_v3OriginalMeterPosition.y,
+                      sts.m_v3OriginalMeterPosition.z, kStsHalf / glGetOrthographicWidth(),
+                      kStsHalf / glGetOrthographicHeight());
 
     // Items that will not fire (Lance, r26: X did nothing all match). X is refused while the fielder
     // is still in an item-throw animation, or while the Super Strike flag is on. If either is left
