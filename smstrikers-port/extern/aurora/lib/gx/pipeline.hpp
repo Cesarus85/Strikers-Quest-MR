@@ -10,12 +10,17 @@ struct DrawData {
   gfx::Range idxRange;
   gfx::Range uniformRange;
   DrawImmediateData immediateData;
+  // strikers-quest r43: ahead of the counts so `stereo` fits the 128-byte inline payload.
+  GXBindGroups bindGroups;
   uint32_t vtxCount;
   uint32_t indexCount;
   uint32_t instanceCount;
-  GXBindGroups bindGroups;
   uint32_t dstAlpha;
+  // strikers-quest r43: a ShaderConfig::stereo pipeline; drawn with the eye being encoded as its first
+  // instance (gfx::current_stereo_eye).
+  uint32_t stereo = 0;
 };
+static_assert(sizeof(DrawData) <= gfx::InlineDrawPayloadSize);
 
 constexpr uint32_t GXPipelineConfigVersion = 13;
 struct PipelineConfig {

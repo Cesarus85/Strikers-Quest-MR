@@ -192,7 +192,35 @@ final class StrikersHome {
         setenv("STRIKERS_PROBE_WIDEN", "1");
 
         prepararDriver(context);
+        // strikers-quest r43: Classic or Plus, the panel's Version (src/platform/edition.cpp reads it
+        // once). Before env.txt, which can still set it for a headset test.
+        startedEdition = edition(context);
+        setenv("STRIKERS_EDITION", startedEdition);
         loadEnvFile(home);
+    }
+
+    // strikers-quest r43: the Version picked in the launcher panel (LobbyActivity), kept in the panel's
+    // preferences beside the game file (GameFile). Plus unless Classic was picked, so a fresh install
+    // and an update from alpha 1.2 both start on Plus.
+    static final String CLASSIC = "classic";
+    static final String PLUS = "plus";
+    private static final String LOBBY_PREFS = "lobby";
+    private static final String KEY_EDITION = "edition";
+
+    /** strikers-quest r43: the Version this game's process started with (prepare); null before. */
+    static String startedEdition;
+
+    /** strikers-quest r43: {@link #CLASSIC} or {@link #PLUS}. */
+    static String edition(Context context) {
+        String e = context.getSharedPreferences(LOBBY_PREFS, Context.MODE_PRIVATE).getString(KEY_EDITION, PLUS);
+        return CLASSIC.equals(e) ? CLASSIC : PLUS;
+    }
+
+    /** strikers-quest r43: with commit(), not apply(): the game reads it in its own process. */
+    static void chooseEdition(Context context, String edition) {
+        context.getSharedPreferences(LOBBY_PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_EDITION, CLASSIC.equals(edition) ? CLASSIC : PLUS)
+                .commit();
     }
 
     /**

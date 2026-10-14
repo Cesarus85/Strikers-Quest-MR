@@ -102,6 +102,23 @@ extern "C" {
  */
 #define GX_AURORA_DECODE_SCOPE 0x0042
 
+/**
+ * strikers-quest r43: single-pass stereo for the headset's eye passes. Followed by a u8 (1 = on,
+ * 0 = off) and, when on, per eye (left, right): 12 f32 (a 3x4 row-major eye-space correction from
+ * the send's centre view to that eye's view) and 4 f32 (that eye's clip-space x and y as
+ * a * clip + b * w of the send's projection). While on, inside an offscreen pass, the pass is
+ * recorded once and encoded twice into the halves of a double-wide target.
+ */
+#define GX_AURORA_SET_STEREO 0x0043
+
+/**
+ * strikers-quest r43: open (u8 1, then u8 target slot, u8 sample count, u8 coverage) or close
+ * (u8 0) the headset's eye pass in-band. The target is one registered with
+ * aurora::gfx::register_xr_eye_target; while open, GX viewports are in native units
+ * (set_offscreen_uses_native_logical_size) and coverage is the pass's alpha (aurora_gx_set_xr_coverage).
+ */
+#define GX_AURORA_XR_EYE_PASS 0x0044
+
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
 
@@ -184,6 +201,19 @@ void GXRestoreFrameBuffer(void);
  * reuse across sends (GX_AURORA_DECODE_SCOPE). In-band, so it applies exactly to the draws between.
  */
 void GXAuroraSetDecodeScope(u8 on);
+
+/**
+ * strikers-quest r43: single-pass stereo on (GX_AURORA_SET_STEREO) for the draws that follow, with
+ * each eye's 3x4 correction (row-major, 12 floats) and clip-space x/y remap (ax, bx, ay, by), or off
+ * (the pointers are then ignored). In-band, so it applies exactly to the draws between.
+ */
+void GXAuroraSetStereo(u8 on, const f32* tLeft, const f32* tRight, const f32* clipLeft, const f32* clipRight);
+
+/**
+ * strikers-quest r43: open (begin = 1) or close (begin = 0) the headset's eye pass in the GX stream
+ * (GX_AURORA_XR_EYE_PASS). slot / samples / coverage are read only when opening.
+ */
+void GXAuroraXrEyePass(u8 begin, u8 slot, u8 samples, u8 coverage);
 
 /**
  * strikers-quest: 0 = off, 1 = draws inside a decode scope, 2 = every eligible draw. Read by the

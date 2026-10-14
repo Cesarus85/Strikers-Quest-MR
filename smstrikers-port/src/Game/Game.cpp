@@ -36,6 +36,9 @@ extern cBall* g_pBall;
 #include "Game/Render/ShootToScoreMeter.h" // strikers-quest: the Super Strike meter in Tabletop
 #include "Game/GameTweaks.h"
 #include "NL/gl/gl.h"
+#include "port/living_crowd.h" // strikers-quest r42: the goal roar
+#include "port/xr_scorer.h"    // strikers-quest r42: the life-size scorer
+#include "port/edition.h"      // strikers-quest r43: Classic / Plus
 #include "port/xr_net.h"       // strikers-quest: online 1v1
 #include "NL/nlTask.h"
 #include <string.h>
@@ -299,6 +302,7 @@ cGame::~cGame()
 namespace Audio
 {
 extern cWorldSFX gWorldSFX;
+extern bool gbGameIsPaused; // strikers-quest r42
 }
 
 /**
@@ -462,6 +466,7 @@ void cGame::BeginGame(bool bRematch, bool bStraightToKickoff)
 
     OSReport("[match] begin rematch=%d kickoff=%d\n",
              bRematch ? 1 : 0, bStraightToKickoff ? 1 : 0);
+    OSReport("[match] version %s\n", PortPlusFeatures() ? "Plus" : "Classic"); // strikers-quest r43
 
     if (m_eGameState != GS_PRE_GAME)
     {
@@ -547,6 +552,13 @@ static void port_celebration_goal(int side, int goalType, int numGoals, int hype
     if (character < 0 && g_pTeams[side] != NULL)
         character = port_celebration_character(g_pTeams[side]->GetCaptain());
     PortXrGoal(side, character, numGoals == 2 ? 1 : 0, hyper, ownGoal ? 1 : 0, humanPad);
+    // r42: the crowd keeps roaring, and (but for a Super Strike) the scorer comes over life-size.
+    // strikers-quest r43: Plus only; Classic is alpha 1.2's goal (no roar, no scorer, no banner).
+    if (PortPlusFeatures())
+    {
+        PortCrowdRoarStart(side);
+        XrScorerGoal(ownGoal ? teamTouch : scorer, side, numGoals == 2);
+    }
 }
 
 extern "C" void PortCelebrationPoll(void)
@@ -591,6 +603,7 @@ extern "C" void PortCelebrationPoll(void)
         s_prevGameState = gameState;
     }
     PortXrSetGameplayLive(taskState == 2 && g_pGame != NULL ? 1 : 0);
+    PortXrSetPaused(Audio::gbGameIsPaused ? 1 : 0); // r42: the crowd volume panel shows while paused
 
     // The player you control (pad 0), for the Tabletop "that's you" marker. Only while the match is
     // being played; cutscenes and replays hide it.

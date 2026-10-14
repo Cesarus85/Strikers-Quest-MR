@@ -64,6 +64,11 @@ public:
     static bool sSTSLighting;
     static cCharacter* spRenderOnlyThisCharacter;
     static bool sbRenderOpposingGoalieToo;
+    // strikers-quest r42: set by Game/XrScorer.cpp around its life-size scorer's SendToGl: the packets
+    // get a matrix handle of their own (sXrIdentity, which XrScorer keeps the identity) and skip the
+    // camera's visibility test.
+    static bool sXrOwnMatrix;
+    static nlMatrix4 sXrIdentity;
 
 }; // total size: 0x58
 

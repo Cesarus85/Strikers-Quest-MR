@@ -95,6 +95,7 @@ float s_lodMinPx = 0.0f;
 float s_eyeHalfWidthPx = 600.0f;
 bool s_skipTallField = false;
 bool s_bothLayers = false;  // this frame sends the table layer as well (Tabletop · Stadium)
+const DrawableObject* s_ball = NULL;  // r43b: PortXrSetBall
 int s_logged = 0;
 
 // The camera of the view being sent, for culling stadium objects it cannot see. Row-vector view
@@ -152,6 +153,12 @@ Info classify(const DrawableObject* object)
 
     const unsigned long creation = object->m_uObjectCreationFlags;
     info.crowd = (creation & 0x20000) != 0;
+    // r43b: the game ball is on the field wherever it happens to be at first sight (PortXrSetBall).
+    if (object == s_ball)
+    {
+        info.stadium = false;
+        return info;
+    }
     // Crowd, skybox and jumbotron are stadium whatever their bounds say.
     if (creation & (0x20000 | 0x100 | 0x10000))
     {
@@ -296,6 +303,8 @@ void PortXrMarkStadiumHandle(uintptr_t matrixHandle)
 
 void PortXrSetEyeSend(bool eyeSend) { s_eyeSend = eyeSend; }
 
+void PortXrSetBall(const DrawableObject* ball) { s_ball = ball; }
+
 void PortXrTuneSkip(int crowd, int stands, int stadiumField)
 {
     s_tuneSkipCrowd = crowd != 0;
@@ -344,8 +353,20 @@ void PortXrNoteCameraSide(const DrawableObject* object, bool hiddenForCamera)
     s_cameraSideHidden[object] = hiddenForCamera;
 }
 
+// r42: the life-size scorer's handle this frame, and whether its eye pass is being sent.
+static uintptr_t s_scorerHandle = 0;
+static bool s_scorerLayer = false;
+
+void PortXrSetScorerHandle(uintptr_t matrixHandle) { s_scorerHandle = matrixHandle; }
+void PortXrSetScorerLayer(bool scorer) { s_scorerLayer = scorer; }
+
 bool PortXrSkipPacketDraw(uintptr_t matrixHandle)
 {
+    // r42: the scorer pass draws the life-size scorer and nothing else; every other send leaves it out.
+    if (s_scorerLayer)
+        return s_scorerHandle == 0 || matrixHandle != s_scorerHandle;
+    if (s_scorerHandle != 0 && matrixHandle == s_scorerHandle)
+        return true;
     if (s_probeState == 2 && s_eyeSend && s_tableLayer && s_cullOn)
         probe_field(matrixHandle);
     // Camera-side objects the game hides from its camera: kept for the life-size stadium only, left
@@ -392,6 +413,7 @@ unsigned long PortXrLayersTakeCulled()
 
 void PortXrLayersEndFrame()
 {
+    s_scorerHandle = 0;  // r42: a frame-memory handle, someone else's next frame
     // The probe collects one frame's field objects, logs them at that frame's table send.
     if (s_probeState == 2)
     {

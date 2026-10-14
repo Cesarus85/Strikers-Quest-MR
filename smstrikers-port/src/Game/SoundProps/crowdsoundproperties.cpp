@@ -1,14 +1,19 @@
 #include "crowdsoundproperties.h"
+#include "port/edition.h" // strikers-quest r43
+#include <string.h>
 
+// strikers-quest r42: the loops are in volume group 2 like the rest of the crowd (they had -1, the
+// sample's own group), so the living crowd's mixer (audio_mix.cpp) knows them as crowd. r43: Plus
+// only (ResetSoundPropTable).
 static SoundProperties CROWDSoundProperties[]
     = { { "CROWDSFX_GOAL_HOME", "SFXCROWD_GEN_Goal_Home", 0.9f, 0.0f, 0.5f, 2, 0 },
           { "CROWDSFX_GOAL_AWAY", "SFXCROWD_GEN_Goal_Away", 0.9f, 0.0f, 0.5f, 2, 0 },
-          { "CROWDSFX_LOOP_NEU", "SFXCROWD_GEN_Loop_Neu", 0.55f, 0.0f, 0.5f, 4294967295, 0 },
-          { "CROWDSFX_LOOP_POS", "SFXCROWD_GEN_Loop_Pos", 0.55f, 0.0f, 0.5f, 4294967295, 0 },
-          { "CROWDSFX_LOOP_NEG", "SFXCROWD_GEN_Loop_Neg", 0.55f, 0.0f, 0.5f, 4294967295, 0 },
-          { "CROWDSFX_LOOP_BOO", "SFXCROWD_GEN_Boo_Loop", 0.55f, 0.0f, 0.5f, 4294967295, 0 },
-          { "CROWDSFX_LOOP_ANT", "SFXCROWD_GEN_Ant_Loop", 0.55f, 0.0f, 0.5f, 4294967295, 0 },
-          { "CROWDSFX_LOOP_WHISTLE", "SFXCROWD_GEN_Whistle_Loop", 0.55f, 0.0f, 0.5f, 4294967295, 0 },
+          { "CROWDSFX_LOOP_NEU", "SFXCROWD_GEN_Loop_Neu", 0.55f, 0.0f, 0.5f, 2, 0 },
+          { "CROWDSFX_LOOP_POS", "SFXCROWD_GEN_Loop_Pos", 0.55f, 0.0f, 0.5f, 2, 0 },
+          { "CROWDSFX_LOOP_NEG", "SFXCROWD_GEN_Loop_Neg", 0.55f, 0.0f, 0.5f, 2, 0 },
+          { "CROWDSFX_LOOP_BOO", "SFXCROWD_GEN_Boo_Loop", 0.55f, 0.0f, 0.5f, 2, 0 },
+          { "CROWDSFX_LOOP_ANT", "SFXCROWD_GEN_Ant_Loop", 0.55f, 0.0f, 0.5f, 2, 0 },
+          { "CROWDSFX_LOOP_WHISTLE", "SFXCROWD_GEN_Whistle_Loop", 0.55f, 0.0f, 0.5f, 2, 0 },
           { "CROWDSFX_EVENT_YEAH_BIG", "SFXCROWD_GEN_Yeah_Big", 0.9f, 0.0f, 0.5f, 2, 0 },
           { "CROWDSFX_EVENT_YEAH_SMALL1", "SFXCROWD_GEN_Yeah_Small_01", 0.7f, 0.0f, 0.5f, 2, 0 },
           { "CROWDSFX_EVENT_YEAH_SMALL2", "SFXCROWD_GEN_Yeah_Small_02", 0.7f, 0.0f, 0.5f, 2, 0 },
@@ -42,6 +47,19 @@ SoundPropAccessor* gpCROWDSoundPropAccessor = &gCROWDSoundPropAccessor;
 void CROWDSoundPropAccessor::ResetSoundPropTable()
 {
     m_pTable = CROWDSoundProperties;
+    // strikers-quest r43: Classic plays the loops in their own group again, as the game does: group
+    // 2's MusyX volume ("Crowd") may not be the one the sound data gives them, and Classic's crowd
+    // must sound like alpha 1.2's. (So in Classic the paused crowd volume may miss the loops.)
+    // Runs from the constructor, during the library's load: STRIKERS_EDITION is set by then
+    // (StrikersHome.prepare), and the table is only read when the game loads its sounds.
+    if (!PortPlusFeatures())
+    {
+        for (u32 i = 0; i < sizeof(CROWDSoundProperties) / sizeof(SoundProperties); i++)
+        {
+            if (strncmp(CROWDSoundProperties[i].eventName, "CROWDSFX_LOOP_", 14) == 0)
+                CROWDSoundProperties[i].i0 = 4294967295;
+        }
+    }
 }
 
 /**

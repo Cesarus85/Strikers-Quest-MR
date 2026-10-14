@@ -102,3 +102,36 @@ void GXAuroraSetDecodeScope(u8 on) {
   GX_WRITE_AURORA(GX_AURORA_DECODE_SCOPE);
   GX_WRITE_U8(on != 0 ? 1 : 0);
 }
+
+void GXAuroraSetStereo(u8 on, const f32* tLeft, const f32* tRight, const f32* clipLeft, const f32* clipRight) {
+  const bool enable = on != 0 && tLeft != nullptr && tRight != nullptr && clipLeft != nullptr && clipRight != nullptr;
+  GX_WRITE_AURORA(GX_AURORA_SET_STEREO);
+  GX_WRITE_U8(enable ? 1 : 0);
+  if (!enable) {
+    return;
+  }
+  const f32* const t[2] = {tLeft, tRight};
+  const f32* const clip[2] = {clipLeft, clipRight};
+  for (int eye = 0; eye < 2; ++eye) {
+    for (int i = 0; i < 12; ++i) {
+      GX_WRITE_F32(t[eye][i]);
+    }
+  }
+  for (int eye = 0; eye < 2; ++eye) {
+    for (int i = 0; i < 4; ++i) {
+      GX_WRITE_F32(clip[eye][i]);
+    }
+  }
+}
+
+void GXAuroraXrEyePass(u8 begin, u8 slot, u8 samples, u8 coverage) {
+  GX_WRITE_AURORA(GX_AURORA_XR_EYE_PASS);
+  GX_WRITE_U8(begin != 0 ? 1 : 0);
+  if (begin != 0) {
+    GX_WRITE_U8(slot);
+    GX_WRITE_U8(samples);
+    GX_WRITE_U8(coverage);
+  }
+  // The FIFO thread switches passes when it gets here: let it see this now.
+  aurora::gx::fifo::publish();
+}

@@ -190,6 +190,12 @@ struct ExternalPassTarget {
 /// swapchain's shared images through this.
 bool create_pass_external(const ExternalPassTarget& target);
 
+/// strikers-quest r43: the headset's eye pass opened and closed in the GX stream
+/// (GXAuroraXrEyePass) instead of with the FIFO drained, so the game thread starts the eye send
+/// while the FIFO thread is still on the normal view. Targets are registered once per slot (the
+/// texture must outlive every pass that uses it); the pass's sample count comes with each begin.
+void register_xr_eye_target(uint32_t slot, const ExternalPassTarget& target) noexcept;
+
 /// What GX viewport/scissor scaling treats as the "logical" frame size while an offscreen pass is
 /// open: off (default), the pass's own size; on, the native configured size, for callers that
 /// replay the full-scene draw path (which sets its viewport in native units) into a larger target.

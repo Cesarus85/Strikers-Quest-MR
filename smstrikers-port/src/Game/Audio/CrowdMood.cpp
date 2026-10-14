@@ -366,6 +366,9 @@ static bool PlayVocal(const CROWD_VOCAL_DEFINITION& VocalDef, CROWD_STATE::VOCAL
         if (playNow)
         {
             ___blank("Playing vocal\n");
+            // strikers-quest r42: whether the crowd's chants and heckles play at all in a match.
+            fprintf(stderr, "[port] crowd: %s (vol %.2f)\n", pStream == g_CrowdAudio.pChantStream ? "chant" : "heckle",
+                    VocalDef.Volume);
 
             float randVol = nlRandomf(VocalDef.VolumeRange, &nlDefaultSeed);
             float scalar = 127.0f;

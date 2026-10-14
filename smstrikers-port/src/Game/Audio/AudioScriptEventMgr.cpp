@@ -1,6 +1,7 @@
 #include "Game/Audio/AudioLoader.h"
 #include "Game/Audio/AudioStream.h"
 #include "Game/Audio/AudioScriptEventMgr.h"
+#include "port/living_crowd.h" // strikers-quest r42
 #include "Game/Audio/SoundEventScript.h"
 #include "Game/EventDataTypes.h"
 #include "Game/Game.h"
@@ -266,6 +267,7 @@ void AudioScriptEventMgr::FireEvent(AudioScriptEventMgr::AUDIO_EVENT Event, Audi
 {
     AUDIO_EVENT_RECORD aer = { Event, Team };
     g_PendingEvents.AddEnd(aer);
+    PortLivingCrowdEvent((int)Event, (int)Team); // strikers-quest r42: the living crowd reacts too
 }
 
 static inline void RecordExcitingEventInline()

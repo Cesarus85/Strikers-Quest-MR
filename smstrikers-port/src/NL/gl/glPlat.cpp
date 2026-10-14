@@ -100,6 +100,7 @@ static void glx_SendViews();
 // or that grab the frame buffer are skipped: their results from the normal send stand (the shadow
 // textures, for one, are what the eye passes project).
 extern "C" int  PortXrStereoFrameBegin(void);
+extern "C" int  PortXrStereoSinglePass(void);
 extern "C" int  PortXrStereoEyeLayer(int eye, int layer, float view[16], float proj[16], int* flags);
 extern "C" void PortXrStereoEyeEnd(int eye);
 extern "C" void PortXrStereoFrameEnd(void);
@@ -113,6 +114,7 @@ enum
     XR_LAYER_SKIP_ACTORS = 1, // players, ball effects, particles: the life-size stadium around you
     XR_LAYER_SKIP_SKY = 2,    // the skybox: the tabletop field in your real room
     XR_LAYER_TABLE = 4,       // the Tabletop field: stadium objects are left out (port/xr_layers.h)
+    XR_LAYER_SCORER = 8,      // r42: the life-size goal scorer alone (Game/XrScorer.cpp)
 };
 
 static bool s_xrEyeSend = false;
@@ -120,6 +122,9 @@ static int s_xrEyeFlags = 0;
 
 static bool glx_XrEyeView(s32 view)
 {
+    // r42: the scorer pass is one character; the packet filter keeps the copy alone.
+    if ((s_xrEyeFlags & XR_LAYER_SCORER) != 0)
+        return view == GLV_Characters;
     // self-test tuning (xr_tune file): leave this view out of this layer
     if (!PortXrEyeViewAllowed(view, (s_xrEyeFlags & XR_LAYER_TABLE) != 0 ? 1 : 0))
         return false;
@@ -181,8 +186,12 @@ static void glx_XrSendEyes()
         glViewGetProjectionMatrix(kXrEyeViews[i], savedProj[i]);
     }
 
-    for (int eye = 0; eye < 2; eye++)
+    // strikers-quest r43: single-pass stereo sends each layer once, from the centre between the
+    // eyes, and Aurora draws it into both (eye 2 = both; PortXrStereoSinglePass, xr_quest.cpp).
+    const bool singlePass = PortXrStereoSinglePass() != 0;
+    for (int pass = 0; pass < (singlePass ? 1 : 2); pass++)
     {
+        const int eye = singlePass ? 2 : pass;
         for (int layer = 0; layer < layers; layer++)
         {
             float view[16];
@@ -199,6 +208,7 @@ static void glx_XrSendEyes()
             s_xrEyeFlags = flags;
             s_xrEyeSend = true;
             PortXrSetTableLayer((flags & XR_LAYER_TABLE) != 0);
+            PortXrSetScorerLayer((flags & XR_LAYER_SCORER) != 0);
             PortXrSetEyeSend(true);
             // Over passthrough the eye image's alpha must be real coverage: xr_quest.cpp turns on
             // Aurora's coverage mode for the Living Room eye passes (gx.hpp g_xrCoverage). r4-r15
@@ -206,6 +216,7 @@ static void glx_XrSendEyes()
             // came out see-through.
             glx_SendViews();
             PortXrSetTableLayer(false);
+            PortXrSetScorerLayer(false);
             PortXrSetEyeSend(false);
             s_xrEyeSend = false;
         }

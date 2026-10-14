@@ -52,6 +52,15 @@ void PortXrProbe();
 void PortXrSetStadiumEconomy(float minPx, float eyeHalfWidthPx, int skipTallField, int bothLayers);
 // glPlat.cpp, once per frame after the sends: the handles are frame memory, reused next frame.
 void PortXrLayersEndFrame();
+// r42: the life-size goal scorer (Game/XrScorer.cpp), a copy of the scorer posed and sent by the
+// port: the matrix handle all its packets carry this frame (0 = none). Those packets are drawn only
+// in the scorer eye pass, and that pass draws nothing else. Cleared by PortXrLayersEndFrame.
+void PortXrSetScorerHandle(uintptr_t matrixHandle);
+// glPlat.cpp: around the scorer layer's eye re-sends.
+void PortXrSetScorerLayer(bool scorer);
+// r43b, DrawableBall::Render: the game ball's drawable. Always field, wherever it is when first
+// classified (in the air or in the net when you switch to Tabletop, it would have stayed stadium).
+void PortXrSetBall(const DrawableObject* ball);
 
 #endif
 

@@ -101,6 +101,7 @@ extern SoundPropAccessor* gpCROWDSoundPropAccessor;
 
 // PORT: was a local `namespace AudioScriptEventMgr { void Update(); }`.
 #include "Game/Audio/AudioScriptEventMgr.h"
+#include "port/living_crowd.h" // strikers-quest r42
 
 namespace Audio
 {
@@ -2219,6 +2220,7 @@ void Audio::Update(float fDeltaT)
     {
         CrowdMood::Update(fDeltaT);
         AudioScriptEventMgr::Update();
+        PortLivingCrowdUpdate(fDeltaT); // strikers-quest r42: the living crowd and the goal roar
     }
 
     if (::g_bWorldSFXInitialized)

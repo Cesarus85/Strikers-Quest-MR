@@ -376,6 +376,9 @@ namespace xr_present {
 std::atomic<bool> g_suppressSurface{false};
 std::atomic<AuroraXrFrameCallback> g_callback{nullptr};
 std::atomic<void*> g_user{nullptr};
+// r43: aurora_xr_set_submit_callback.
+std::atomic<AuroraXrSubmitCallback> g_submitCallback{nullptr};
+std::atomic<void*> g_submitUser{nullptr};
 
 enum class SlotState { Free, Copying, Mapping, Mapped };
 struct Slot {
@@ -589,8 +592,10 @@ void end_frame() noexcept {
   }
 #endif
 
+  // strikers-quest r43: this frame's number for the submit callback (end_frame counts it up).
+  const uint32_t xrFrame = gfx::current_frame();
   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
-                  imguiDrawData = std::move(imguiDrawData)](
+                  imguiDrawData = std::move(imguiDrawData), xrFrame](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
@@ -681,6 +686,10 @@ void end_frame() noexcept {
     {
       ZoneScopedN("Queue Submit");
       g_queue.Submit(1, &buffer);
+    }
+    // strikers-quest r43: the headset ends its eye images' access for this frame here.
+    if (const auto submitCallback = xr_present::g_submitCallback.load(std::memory_order_acquire)) {
+      submitCallback(xrFrame, xr_present::g_submitUser.load(std::memory_order_acquire));
     }
     {
       // smstrikers-port: see namespace gpu_time above.
@@ -819,6 +828,11 @@ void aurora_xr_set_frame_callback(AuroraXrFrameCallback callback, void* user) {
   aurora::xr_present::g_user.store(user, std::memory_order_release);
   aurora::xr_present::g_callback.store(callback, std::memory_order_release);
 }
+void aurora_xr_set_submit_callback(AuroraXrSubmitCallback callback, void* user) {
+  aurora::xr_present::g_submitUser.store(user, std::memory_order_release);
+  aurora::xr_present::g_submitCallback.store(callback, std::memory_order_release);
+}
+uint32_t aurora_xr_current_frame(void) { return aurora::gfx::current_frame(); }
 AuroraBackend aurora_get_backend() { return aurora::g_config.desiredBackend; }
 const AuroraBackend* aurora_get_available_backends(size_t* count) {
   if (count != nullptr) {

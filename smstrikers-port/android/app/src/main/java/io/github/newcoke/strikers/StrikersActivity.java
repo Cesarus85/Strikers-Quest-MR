@@ -123,6 +123,34 @@ public class StrikersActivity extends SDLActivity {
     /** strikers-quest r39: src/platform/xr_net.cpp; takes effect between matches. */
     private static native void nativeSetRoom(String room);
 
+    /**
+     * strikers-quest r43: src/platform/xr_net.cpp; true once after it refused an online match (the
+     * friend is on the other Version, or another build) and wrote why for the launcher panel.
+     */
+    private static native boolean nativeTakeOnlineNote();
+
+    private boolean onlineNoteHook = true;  // r43: false once this build turns out not to have it
+
+    /**
+     * strikers-quest r43: an online match refused: back to the launcher panel, which says why and has
+     * the Version button (a Version is only taken when a game starts), and this game ends.
+     */
+    private boolean backToPanelForOnlineNote() {
+        if (!onlineNoteHook) return false;
+        boolean note;
+        try {
+            note = nativeTakeOnlineNote();
+        } catch (UnsatisfiedLinkError e) {
+            onlineNoteHook = false;
+            return false;
+        }
+        if (!note) return false;
+        android.util.Log.i("strikers", "online match refused, back to the panel (online-note.txt)");
+        startActivity(new android.content.Intent(this, LobbyActivity.class));
+        finish();
+        return true;
+    }
+
     private static String roomFrom(android.content.Intent intent) {
         String room = intent != null ? intent.getStringExtra(LobbyActivity.EXTRA_ROOM) : null;
         return room != null ? LobbyActivity.clean(room) : "";
@@ -139,6 +167,18 @@ public class StrikersActivity extends SDLActivity {
     @Override
     protected void onNewIntent(android.content.Intent intent) {
         super.onNewIntent(intent);
+        // strikers-quest r43: the Version is taken when the game starts (StrikersHome.prepare). The
+        // panel ends a game left running on the old one when the Version changes; should one still be
+        // here, it goes back to the panel and ends, so the next start is a fresh game on the new one.
+        if (intent != null && intent.hasExtra(LobbyActivity.EXTRA_EDITION)
+                && StrikersHome.startedEdition != null
+                && !StrikersHome.startedEdition.equals(intent.getStringExtra(LobbyActivity.EXTRA_EDITION))) {
+            android.util.Log.w("strikers", "the panel's Version changed while this game ran: ending it");
+            LobbyActivity.writeOnlineNote(this, LobbyActivity.NOTE_VERSION_CHANGED);
+            startActivity(new android.content.Intent(this, LobbyActivity.class));
+            finish();
+            return;
+        }
         // The game was already running and the panel picked a room (or offline) again.
         if (intent != null && intent.hasExtra(LobbyActivity.EXTRA_ROOM)) {
             setIntent(intent);
@@ -224,6 +264,7 @@ public class StrikersActivity extends SDLActivity {
     private void seguirControleFisico() {
         relogio.postDelayed(new Runnable() {
             @Override public void run() {
+                if (backToPanelForOnlineNote()) return;  // strikers-quest r43
                 if (overlay != null) {
                     final boolean mostrar = Toque.ligada();
                     final int quer = mostrar ? View.VISIBLE : View.GONE;

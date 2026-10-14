@@ -937,6 +937,12 @@ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
 
 bool is_offscreen() noexcept { return g_recorder.inOffscreen; }
 
+void mark_current_pass_stereo() noexcept {
+  if (g_recorder.currentRenderPass < current_render_passes().size()) {
+    current_render_passes()[g_recorder.currentRenderPass].stereoReplay = true;
+  }
+}
+
 uint32_t get_sample_count() noexcept {
   CHECK(g_recorder.currentRenderPass != UINT32_MAX, "get_sample_count called outside of a frame");
   return current_render_passes()[g_recorder.currentRenderPass].msaaSamples;
@@ -1058,7 +1064,38 @@ bool create_pass_external(const ExternalPassTarget& target) {
 
 namespace {
 bool s_offscreenUsesNativeLogicalSize = false;
+// strikers-quest r43: the headset's eye pass targets, one per frame slot (register_xr_eye_target).
+std::array<ExternalPassTarget, 4> s_xrEyeTargets;
 } // namespace
+
+void register_xr_eye_target(uint32_t slot, const ExternalPassTarget& target) noexcept {
+  if (slot < s_xrEyeTargets.size()) {
+    s_xrEyeTargets[slot] = target;
+  }
+}
+
+// strikers-quest r43: GX_AURORA_XR_EYE_PASS, on the FIFO thread, where the draws before it have
+// already gone into the pass they belong to (create_pass_external drains for the same reason).
+bool begin_xr_eye_pass(uint32_t slot, uint32_t samples) {
+  if (slot >= s_xrEyeTargets.size() || !s_xrEyeTargets[slot].texture || !s_xrEyeTargets[slot].view) {
+    Log.warn("begin_xr_eye_pass: no target in slot {}", slot);
+    return false;
+  }
+  if (!g_recorder.active() || g_recorder.currentRenderPass == UINT32_MAX || g_recorder.inOffscreen) {
+    Log.warn("begin_xr_eye_pass: no EFB pass to suspend");
+    return false;
+  }
+  ExternalPassTarget target = s_xrEyeTargets[slot];
+  target.sampleCount = samples;
+  begin_offscreen(target.width, target.height, &target);
+  return true;
+}
+
+void end_xr_eye_pass() {
+  if (g_recorder.active() && g_recorder.inOffscreen) {
+    end_offscreen();
+  }
+}
 
 void set_offscreen_uses_native_logical_size(bool enabled) noexcept { s_offscreenUsesNativeLogicalSize = enabled; }
 bool offscreen_uses_native_logical_size() noexcept { return s_offscreenUsesNativeLogicalSize; }

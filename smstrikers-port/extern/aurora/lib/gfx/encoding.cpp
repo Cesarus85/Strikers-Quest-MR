@@ -37,6 +37,23 @@ using webgpu::g_queue;
 namespace {
 constexpr Module Log{"aurora::gfx"};
 PipelineRef g_currentPipeline;
+uint32_t g_stereoEye = 0;  // strikers-quest r43: render worker only
+
+// strikers-quest r43 (after aurora-vr): a viewport / scissor recorded against the whole double-wide
+// stereo target, moved into one eye's half.
+Viewport stereo_viewport(const Viewport& vp, uint32_t eye, float halfWidth) {
+  Viewport out = vp;
+  out.left = vp.left * 0.5f + static_cast<float>(eye) * halfWidth;
+  out.width = vp.width * 0.5f;
+  return out;
+}
+
+ClipRect stereo_scissor(const ClipRect& sc, uint32_t eye, int32_t halfWidth) {
+  ClipRect out = sc;
+  out.x = sc.x / 2 + static_cast<int32_t>(eye) * halfWidth;
+  out.width = (sc.x + sc.width) / 2 - sc.x / 2;
+  return out;
+}
 
 void apply_viewport(const wgpu::RenderPassEncoder& pass, const Viewport& vp) {
   const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
@@ -109,9 +126,10 @@ void execute_encoder_task(wgpu::CommandEncoder& cmd, FramePacket& frame, const E
   }
 }
 
-void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
-  ZoneScoped;
+void render_pass_commands(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo,
+                          uint32_t stereoEye) {
   g_currentPipeline = UINTPTR_MAX;
+  g_stereoEye = stereoEye;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
 #endif
@@ -119,6 +137,10 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
   ClipRect currentScissor{};
   bool hasViewport = false;
   bool hasScissor = false;
+  const auto& targetSize = passInfo.colorAttachments[SceneColorAttachmentIndex].size;
+  const bool stereo = passInfo.stereoReplay;
+  const float halfWidthF = static_cast<float>(targetSize.width) * 0.5f;
+  const int32_t halfWidthI = static_cast<int32_t>(targetSize.width / 2);
 
   // Bind bind group for the whole pass
   pass.SetBindGroup(0, resources().staticBindGroup);
@@ -145,14 +167,14 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
 #endif
     switch (cmd.type) {
     case CommandType::SetViewport: {
-      const auto& vp = cmd.data.setViewport;
+      const auto vp = stereo ? stereo_viewport(cmd.data.setViewport, stereoEye, halfWidthF) : cmd.data.setViewport;
       apply_viewport(pass, vp);
       currentViewport = vp;
       hasViewport = true;
     } break;
     case CommandType::SetScissor: {
-      const auto& sc = cmd.data.setScissor;
-      apply_scissor(pass, sc, passInfo.colorAttachments[SceneColorAttachmentIndex].size);
+      const auto sc = stereo ? stereo_scissor(cmd.data.setScissor, stereoEye, halfWidthI) : cmd.data.setScissor;
+      apply_scissor(pass, sc, targetSize);
       currentScissor = sc;
       hasScissor = true;
     } break;
@@ -171,7 +193,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
         apply_viewport(pass, currentViewport);
       }
       if (hasScissor) {
-        apply_scissor(pass, currentScissor, passInfo.colorAttachments[SceneColorAttachmentIndex].size);
+        apply_scissor(pass, currentScissor, targetSize);
       }
     } break;
     case CommandType::DebugMarker: {
@@ -187,6 +209,17 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
     pass.PopDebugGroup();
   }
 #endif
+  g_stereoEye = 0;
+}
+
+void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
+  ZoneScoped;
+  // strikers-quest r43: single-pass stereo, the same commands once per half. The halves never
+  // overlap, so left then right draws the same as two eye passes would.
+  render_pass_commands(pass, frame, passInfo, 0);
+  if (passInfo.stereoReplay) {
+    render_pass_commands(pass, frame, passInfo, 1);
+  }
 }
 
 void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex) {
@@ -512,4 +545,6 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
   g_currentPipeline = ref;
   return true;
 }
+
+uint32_t current_stereo_eye() noexcept { return g_stereoEye; }
 } // namespace aurora::gfx

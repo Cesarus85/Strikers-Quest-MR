@@ -32,6 +32,9 @@
 #include "NL/nlString.h"
 #include "NL/globalpad.h"
 #include "Game/TrophyInfo.h"
+#include "port/xr_quest.h" // strikers-quest r42: PORT_GOAL_SHOW_FRAMES
+#include "port/edition.h"  // strikers-quest r43: the held replay is Plus only
+#include <string.h>
 
 extern AudioStreamTrack::TrackManagerBase* g_pTrackManager;
 
@@ -92,6 +95,10 @@ Presentation::Presentation()
     mUseInterruptWipe = NULL;
     mQueuedFunction = NULL;
     mGoalQuality = HIGHLIGHT_QUALITY_EMPTY;
+    mGoalShowFrames = -1;  // strikers-quest r42
+    mGoalShowHold = false;
+    mGoalShowHoldNext = false;
+    mGoalReplayLoops = 0;
     unsigned long fileSize = 0;
     void* byteCode = nlLoadEntireFile("art/presentation/presentation.byte_code", &fileSize, 0x20, AllocateStart);
     LoadByteCode(byteCode);
@@ -530,8 +537,25 @@ void Presentation::WaitForAutoReplayCompletion(const char* wipe)
     {
         nlSingleton<ScreenTransitionManager>::Instance()->SelectRandomTransition(wipe);
     }
+    // strikers-quest r42: after a goal the replay goes round again (a new camera, same frozen
+    // footage) until the life-size scorer's show is over, PORT_GOAL_SHOW_FRAMES lockstep frames
+    // after the goal. The first pass always plays out whole; an extra pass is cut at the target, under
+    // the "out" wipe. A skip ends the hold (the script's bypass skips this call altogether).
+    const bool hold = mGoalShowHold && strncmp(mCurrentFunction, "Goal", 4) == 0 && mGoalShowFrames >= 0;
+    const bool due = mGoalShowFrames >= PORT_GOAL_SHOW_FRAMES;
     if (!ReplayChoreo::Instance().Done())
     {
+        if (hold && mGoalReplayLoops > 0 && due)
+        {
+            return;
+        }
+        StopWithUndo();
+        return;
+    }
+    if (hold && !due)
+    {
+        ++mGoalReplayLoops;
+        ReplayChoreo::Instance().StartAutoReplay(REPLAY_TYPE_GOAL);
         StopWithUndo();
     }
 }
@@ -630,6 +654,26 @@ void Presentation::Update(float deltaT)
             }
         }
 
+        // strikers-quest r42: count the post-goal show in lockstep game frames (both headsets
+        // agree); it starts with the goal script and ends when that script does.
+        const bool goalFn = strncmp(mCurrentFunction, "Goal", 4) == 0;
+        if (!goalFn)
+        {
+            mGoalShowFrames = -1;
+            mGoalShowHold = false;
+        }
+        else if (mGoalShowFrames < 0)
+        {
+            mGoalShowFrames = 0;
+            mGoalShowHold = mGoalShowHoldNext;
+            mGoalShowHoldNext = false;
+            mGoalReplayLoops = 0;
+        }
+        else
+        {
+            ++mGoalShowFrames;
+        }
+
         Run();
 
         ReplayChoreo::Instance().Update(deltaT);
@@ -642,6 +686,7 @@ void Presentation::Update(float deltaT)
 
         if (mSkipPressed && mInsideByPass)
         {
+            mGoalShowHold = false;  // strikers-quest r42: a skip ends the post-goal show too
             mByPassing = true;
             mSkipPressed = false;
             g_pEventManager->CreateValidEvent(0x1C, 0x14);
@@ -1009,6 +1054,14 @@ void Presentation::EventHandler(Event* event)
 
             FixedUpdateTask::mTimeScale = 1.0f;
             ParticleUpdateTask::SetTimeScale(1.0f);
+
+            // strikers-quest r42: every goal but a Super Strike gets the life-size scorer, and the
+            // replay holds until that show is over (Presentation::Update starts the count).
+            // r43: Plus only. In Classic nothing holds, so WaitForAutoReplayCompletion is the game's
+            // own (one pass, then on); the frame count still runs, read only by the scorer
+            // (xr_scorer.cpp), which Classic never arms.
+            mGoalShowHoldNext = PortPlusFeatures() && gsd->uNumGoalsScored != 2;
+            mGoalShowFrames = -1;
 
             if (nlStrCmp<char>(idleFun, mCurrentFunction) != 0 && nlStrCmp<char>(idleFun, script) != 0)
             {

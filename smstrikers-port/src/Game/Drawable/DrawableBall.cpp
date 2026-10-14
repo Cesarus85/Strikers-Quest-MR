@@ -9,6 +9,7 @@
 #include "NL/gl/glState.h"
 #include "NL/gl/glUserData.h"
 #include "port/xr_quest.h" // strikers-quest: a bigger ball on the Tabletop field
+#include "port/xr_layers.h" // strikers-quest r43b: the ball always on the field
 
 static int g_nMotionBlurDivs = 5;
 static float g_fMotionBlurAlpha0 = 0.1f;
@@ -179,6 +180,7 @@ void DrawableBall::Render() const
     pDrawableBall->m_scale = fScale;
     pDrawableBall->m_translation = v3Drawn;
     pDrawableBall->m_worldMatrixUpToDate = 0;
+    PortXrSetBall(pDrawableBall);  // r43b: always on the Tabletop field (port/xr_layers.h)
 
     unsigned long uSavedFlags = pDrawableBall->m_uObjectCreationFlags;
     pDrawableBall->m_uObjectCreationFlags &= ~0x80;

@@ -158,6 +158,12 @@ typedef void (*AuroraXrFrameCallback)(const uint8_t* pixels, uint32_t width, uin
                                       uint32_t bytesPerRow, bool bgra, void* user);
 void aurora_xr_set_surface_suppressed(bool suppressed);
 void aurora_xr_set_frame_callback(AuroraXrFrameCallback callback, void* user);
+/* strikers-quest r43: called on the render worker right after a frame's commands are submitted,
+ * with that frame's number (aurora_xr_current_frame() while it was being recorded), so a caller
+ * can end its shared-texture access there instead of waiting for the render worker. */
+typedef void (*AuroraXrSubmitCallback)(uint32_t frame, void* user);
+void aurora_xr_set_submit_callback(AuroraXrSubmitCallback callback, void* user);
+uint32_t aurora_xr_current_frame(void);
 
 void aurora_set_log_level(AuroraLogLevel level);
 void aurora_set_pause_on_focus_lost(bool value);

@@ -30,6 +30,7 @@ static_assert(sizeof(Vertex) == 44, "mesh vertex layout");
 enum Id : uint8_t {
   kPaperBent, kPaperCurl, kPaperTwist, kStreamer,
   kCoin, kHeart, kStar, kPetal, kMushroom, kEgg, kBanana, kShell, kHammer, kRose, kGarlic, kBow,
+  kCap,  // r43c: the hat trick's hats
   kCount
 };
 
@@ -413,6 +414,35 @@ inline Set build(float detail) {
   }
   b.ellipsoid(n(12, 6), n(8, 4), 1.0f, 0.1f, 0.1f, 0.1f);
   finish(kBow);
+
+  // r43c, the hat trick: a cap (Mario's kind). Crown and visor in the main colour, a dark inside, a
+  // round badge (detail colour) on the front, a button on top. The visor points along +z.
+  start(kCap);
+  b.lathe(1, n(24, 10), n(8, 3), 0.0f,
+          [](float, float v) {
+            const float phi = 0.5f * kPi * v;
+            return RH{0.42f * std::cos(phi), -0.12f + 0.36f * std::sin(phi)};
+          },
+          none);
+  b.lathe_poly(1, n(24, 10), 3.0f, {{0.0f, -0.12f}, {0.42f, -0.12f}});
+  b.patch(n(14, 6), 2, 0.0f,
+          [](float u, float v) {
+            const float a = -1.15f + 2.3f * u;
+            const float r = 0.41f + 0.3f * v * std::cos(0.9f * a);
+            return V3{r * std::sin(a), -0.12f - 0.035f * v, r * std::cos(a)};
+          },
+          none);
+  {
+    const size_t from = set.verts.size();
+    b.ellipsoid(n(14, 6), n(6, 3), 1.0f, 0.12f, 0.12f, 0.015f);
+    b.xform(from, rot_x(-0.49f), V3{0.0f, 0.05f, 0.375f});
+  }
+  {
+    const size_t from = set.verts.size();
+    b.ellipsoid(n(8, 4), n(4, 2), 0.0f, 0.035f, 0.025f, 0.035f);
+    b.xform(from, rot_y(0.0f), V3{0.0f, 0.24f, 0.0f});
+  }
+  finish(kCap);
 
   return set;
 }

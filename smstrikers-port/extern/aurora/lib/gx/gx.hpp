@@ -397,6 +397,17 @@ struct GXState {
   f32 backScale = 0.0f;
   f32 clamp = 0.0f;
 
+  // strikers-quest r43: single-pass stereo (GX_AURORA_SET_STEREO). While on inside an offscreen pass,
+  // the headset's eye pass is recorded once from the centre between the eyes and encoded twice, into
+  // the halves of a double-wide target (encoding.cpp); the vertex shader moves each position into the
+  // eye being encoded (t, eye space) and remaps its clip x/y to that eye's frustum (clip = ax, bx, ay,
+  // by: a * clip + b * w).
+  struct StereoState {
+    bool enabled = false;
+    std::array<Mat3x4<float>, 2> t;
+    std::array<Vec4<float>, 2> clip;
+  } stereo;
+
   // View state
   AuroraViewportPolicy viewportPolicy = AURORA_VIEWPORT_FIT;
   gfx::Viewport logicalViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
@@ -443,7 +454,12 @@ extern GXState g_gxState;
 // config carries it as dstAlpha = XrCoverageDstAlpha. Toggled only with the FIFO drained
 // (aurora_gx_set_xr_coverage, from src/platform/xr_quest.cpp).
 inline constexpr uint32_t XrCoverageDstAlpha = 0x100;
-extern std::atomic<bool> g_xrCoverage;
+// strikers-quest r43b: coverage for a layer composited over another drawn layer (Tabletop · Stadium's
+// table over the split stadium): as above, but a blended draw that also writes depth is a surface and
+// counts as fully covered (the ball, drawn blended before the field around it, came out see-through).
+inline constexpr uint32_t XrOverlayDstAlpha = 0x101;
+inline bool is_xr_coverage(uint32_t dstAlpha) { return dstAlpha == XrCoverageDstAlpha || dstAlpha == XrOverlayDstAlpha; }
+extern std::atomic<int> g_xrCoverage;  // 0 off, 1 over passthrough, 2 over a drawn layer
 struct ShaderInfo;
 
 void initialize() noexcept;
@@ -463,6 +479,8 @@ void set_render_viewport(const gfx::Viewport& viewport) noexcept;
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept;
 void set_render_scissor(const gfx::ClipRect& scissor) noexcept;
 void copy_tex(const void* dest, GXBool clear) noexcept;
+// strikers-quest r43: stereo is on and the draws being recorded go to an offscreen pass (the eye pass).
+bool stereo_active() noexcept;
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
 
@@ -508,7 +526,10 @@ struct ShaderConfig {
   // strikers-quest: vertex attributes come pre-decoded as floats from the vertex pool
   // (vertex_decode.hpp) instead of being pulled from the raw GX bytes. 0 keeps every existing config.
   u8 decodedVtx : 1 = false;
-  u8 pad1 : 4 = 0;
+  // strikers-quest r43: positions go through GXState::stereo for the eye being encoded (the instance
+  // index). 0 keeps every existing config.
+  u8 stereo : 1 = false;
+  u8 pad1 : 3 = 0;
   u8 pad2 = 0;
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
@@ -546,7 +567,12 @@ struct ShaderInfo {
   bool usesFog : 1 = false;
   bool lightingEnabled : 1 = false;
   u8 lineMode : 2 = 0;
+  // strikers-quest r43: the uniform block ends with the stereo tail (StereoUniformSize). A stereo
+  // shader reads it; its mono twin has the same layout before it, so one block serves both.
+  bool stereo : 1 = false;
 };
+// strikers-quest r43: t[2] (3x4) + clip[2] (vec4), appended after every other uniform field.
+constexpr u32 StereoUniformSize = 2 * 48 + 2 * 16;
 struct BindGroupRanges {
   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
 };

@@ -1,6 +1,7 @@
 // The software mixer that stands in for the GameCube DSP.
 
 #include "port/audio.h"
+#include "port/edition.h" // strikers-quest r43
 #include "port/host.h"
 
 #if defined(PORT_USE_AURORA)
@@ -395,6 +396,55 @@ void publishCursor(DSPvoice* v, const SAMPLE_INFO& smp, u32 pos) {
 
 } // namespace
 
+// strikers-quest r42 (port/audio.h): the crowd's loudness, from the match (living) and from you
+// (user), and in the Stadium VR modes where each crowd voice comes from.
+static float s_crowdLiving = 1.0f;
+static float s_crowdUser = 1.0f;
+static float s_crowdYaw = 0.0f;
+static int s_crowdSpatial = 0;
+
+extern "C" void PortAudioSetCrowdLiving(float gain) { s_crowdLiving = gain; }
+extern "C" void PortAudioSetCrowdUser(float gain, int spatial, float headYaw) {
+    s_crowdUser = gain;
+    // strikers-quest r43: the crowd round the stands is Plus; Classic keeps the game's own panning,
+    // so there a crowd voice is only scaled (by 1 at your default crowd volume: as the game mixes it).
+    s_crowdSpatial = spatial && PortPlusFeatures();
+    s_crowdYaw = headYaw;
+}
+
+static s32 crowd_clamp(float v) { return v <= 0.0f ? 0 : (v >= 65535.0f ? 65535 : (s32)v); }
+
+// A crowd voice's nine bus volumes (L, R, S, then aux A and B): scaled, and in the stadium spread
+// round the stands. Each voice gets a fixed bearing from its slot (the golden angle apart, so the
+// voices of a cheer land all round you) and is panned by where it sits relative to your head;
+// behind you a little quieter.
+static void crowd_volumes(size_t vi, s32 vol[9]) {
+    const float g = s_crowdLiving * s_crowdUser;
+    if (!s_crowdSpatial) {
+        for (int b = 0; b < 9; ++b)
+            vol[b] = crowd_clamp(vol[b] * g);
+        return;
+    }
+    const float bearing = std::fmod((float)vi * 2.39996323f, 6.2831853f);
+    const float rel = bearing - s_crowdYaw;
+    const float p = std::sin(rel), front = std::cos(rel);
+    const float rear = front >= 0.0f ? 1.0f : 0.75f + 0.25f * (1.0f + front);
+    const float left = std::sqrt(0.5f * (1.0f - p)) * 1.41421356f * rear * g;
+    const float right = std::sqrt(0.5f * (1.0f + p)) * 1.41421356f * rear * g;
+    const float mono = (float)(vol[0] > vol[1] ? vol[0] : vol[1]);
+    const float monoA = (float)(vol[3] > vol[4] ? vol[3] : vol[4]);
+    const float monoB = (float)(vol[6] > vol[7] ? vol[6] : vol[7]);
+    vol[0] = crowd_clamp(mono * left);
+    vol[1] = crowd_clamp(mono * right);
+    vol[2] = crowd_clamp(vol[2] * g);
+    vol[3] = crowd_clamp(monoA * left);
+    vol[4] = crowd_clamp(monoA * right);
+    vol[5] = crowd_clamp(vol[5] * g);
+    vol[6] = crowd_clamp(monoB * left);
+    vol[7] = crowd_clamp(monoB * right);
+    vol[8] = crowd_clamp(vol[8] * g);
+}
+
 extern "C" void PortAudioMixRender(s16* dest) {
     if (dest == nullptr)
         return;
@@ -545,9 +595,12 @@ extern "C" void PortAudioMixRender(s16* dest) {
                 // The nine pan volumes, gathered once. >> 15 and not >> 16 because they are 15-bit
                 // unity: `hwSetVolume` builds each as `32767.f * v`, and the envelope adsrHandle
                 // publishes tops out at 0x7FFF too.
-                const s32 vol[kBuses] = { v->volL,  v->volR,  v->volS,
-                                          v->volLa, v->volRa, v->volSa,
-                                          v->volLb, v->volRb, v->volSb };
+                s32 vol[kBuses] = { v->volL,  v->volR,  v->volS,
+                                    v->volLa, v->volRa, v->volSa,
+                                    v->volLb, v->volRb, v->volSb };
+                // strikers-quest r42: the crowd (MusyX volume group 2) is the living crowd's.
+                if (synthVoice != nullptr && synthVoice[vi].vGroup == 2)
+                    crowd_volumes(vi, vol);
                 int busN = 0;
                 int busIdx[kBuses];
                 s32 busVol[kBuses];
@@ -875,5 +928,7 @@ extern "C" void PortAudioDumpWrite(const void* pcm, unsigned int frames) {
     (void)pcm;
     (void)frames;
 }
+extern "C" void PortAudioSetCrowdLiving(float) {}
+extern "C" void PortAudioSetCrowdUser(float, int, float) {}
 
 #endif

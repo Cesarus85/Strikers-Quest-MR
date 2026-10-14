@@ -374,6 +374,10 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     info.uniformSize += MaxIndTexMtxs * sizeof(Mat2x4<float>);
   }
   info.uniformSize += info.sampledTextures.count() * sizeof(Vec4<float>);
+  if (config.stereo) {
+    info.stereo = true;
+    info.uniformSize += StereoUniformSize;
+  }
   info.uniformSize = gfx::align_uniform(info.uniformSize);
   if (info.uniformSize > MaxUniformSize) {
     Log.fatal("Uniform size exceeds maximum: {} > {}", info.uniformSize, MaxUniformSize);
@@ -502,6 +506,30 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
     }
     buf.append(texture_size_bias(get_texture(static_cast<GXTexMapID>(i))));
   }
+  if (info.stereo) {
+    // strikers-quest r43: must match shader.cpp's stereo_t / stereo_clip. Every field before is a
+    // multiple of 16 bytes, so this lands where WGSL puts it. A 2D (orthographic) draw looks the
+    // same from both eyes: no correction.
+    const auto& st = g_gxState.stereo;
+    const bool ortho = g_gxState.projType == GX_ORTHOGRAPHIC;
+    const Mat3x4<float> identity(Vec4<float>(1.f, 0.f, 0.f, 0.f), Vec4<float>(0.f, 1.f, 0.f, 0.f),
+                                 Vec4<float>(0.f, 0.f, 1.f, 0.f));
+    const Vec4<float> noRemap(1.f, 0.f, 1.f, 0.f);
+    for (int eye = 0; eye < 2; ++eye) {
+      buf.append(ortho ? identity : st.t[eye]);
+    }
+    for (int eye = 0; eye < 2; ++eye) {
+      buf.append(ortho ? noRemap : st.clip[eye]);
+    }
+  }
+}
+
+// strikers-quest r43: whether `monoInfo`'s draw can take the stereo tail and still fit the uniform
+// binding. build_shader_info counts 30 of the 36 matrices fill_uniform writes, so the real block is
+// 6 matrices bigger than uniformSize says.
+bool stereo_uniform_fits(const ShaderInfo& monoInfo) noexcept {
+  const u32 real = monoInfo.uniformSize + 6 * sizeof(Mat3x4<float>) + StereoUniformSize;
+  return gfx::align_uniform(real) <= MaxUniformSize;
 }
 
 gfx::Range build_uniform(const ShaderInfo& info) noexcept {

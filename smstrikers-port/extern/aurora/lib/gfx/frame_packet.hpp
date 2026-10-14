@@ -108,6 +108,10 @@ struct RenderPass {
   // (gfx::create_pass_external), so the pass's output is consumed by whoever owns that texture and
   // is never discardable for lack of a snapshot/resolve consumer.
   bool externalTarget = false;
+  // strikers-quest r43: single-pass stereo (gx::GXState::stereo). The commands are encoded twice,
+  // left half then right half of the double-wide target, viewports and scissors halved and moved,
+  // with the eye being encoded as the stereo draws' first instance.
+  bool stereoReplay = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 
   RenderTargetLayout target_layout() const noexcept;

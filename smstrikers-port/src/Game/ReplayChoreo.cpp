@@ -293,6 +293,10 @@ void ReplayChoreo::StartAutoReplay(ReplayType rt)
 {
     mReplayManager = ReplayManager::Instance();
     mReplay = mReplayManager->mReplay;
+    // strikers-quest r42: a pass cut short (the post-goal show's held replay, or a skip) can leave a
+    // RunFor behind; a fresh pass starts without it.
+    mRunningFor = false;
+    mRunForTimeLeft = 0.0f;
 
     NetMesh::spNegativeXNetMesh->UpdateUntilRelaxed();
     NetMesh::spPositiveXNetMesh->UpdateUntilRelaxed();

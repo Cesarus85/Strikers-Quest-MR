@@ -55,6 +55,13 @@ int  PortAudioDumpStart(const char* path);
 void PortAudioDumpStop(void);
 void PortAudioDumpWrite(const void* pcm, unsigned int frames);
 
+/* strikers-quest r42: the crowd in the mixer (audio_mix.cpp). Every crowd voice (MusyX volume group
+ * 2, which r42 also gives the crowd's mood loops) is scaled by living * user, and with spatial on its
+ * voices are spread round the stands and panned by where your head points (headYaw, radians, 0 =
+ * the start pose's forward, positive to the right). Mixing only: nothing the match reads. */
+void PortAudioSetCrowdLiving(float gain); /* living_crowd.cpp: the match's mood, every game frame */
+void PortAudioSetCrowdUser(float gain, int spatial, float headYaw); /* xr_quest.cpp, every frame */
+
 #ifdef __cplusplus
 }
 #endif

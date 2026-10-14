@@ -30,7 +30,7 @@ Notes:
 
 | APK path | What it is | Third-party content |
 | --- | --- | --- |
-| `lib/arm64-v8a/libmain.so` | The game, the port and its engine | Aurora (incl. magic_enum, libogc-derived code), MusyX, zstd, bzip2, LZMA SDK, ODE, SDL 3, Dawn (incl. Tint, Abseil, SPIRV-Tools, SPIR-V grammar, webgpu.h), Abseil, {fmt}, xxHash, libpng, FreeType, Dear ImGui (incl. ProggyClean font, stb), SQLite, LLVM runtime pieces |
+| `lib/arm64-v8a/libmain.so` | The game, the port and its engine | Aurora (incl. magic_enum, libogc-derived code), MusyX, zstd, bzip2, LZMA SDK, ODE, SDL 3, Dawn (incl. Tint, Abseil, SPIRV-Tools, SPIR-V grammar, webgpu.h), Abseil, {fmt}, xxHash, libpng, FreeType, Dear ImGui (incl. ProggyClean font, stb), SQLite, Luckiest Guy font, LLVM runtime pieces |
 | `lib/arm64-v8a/libc++_shared.so` | C++ standard library | LLVM libc++ / libc++abi (from Android NDK r29) |
 | `lib/arm64-v8a/libopenxr_loader.so` | OpenXR loader | Khronos OpenXR loader 1.1.63 (incl. jsoncpp, jnipp, android-jni-wrappers, LLVM libc++) |
 | `lib/arm64-v8a/libmain_hook.so`, `libfile_redirect_hook.so`, `libgsl_alloc_hook.so`, `libhook_impl.so` | GPU driver loading hooks | libadrenotools (incl. liblinkernsbypass) |
@@ -72,6 +72,7 @@ Notes:
 | android-jni-wrappers (bundled in the OpenXR loader) | - | BSL-1.0 | https://github.com/KhronosGroup/OpenXR-SDK (`src/external/android-jni-wrappers`) |
 | LLVM libc++, libc++abi, libunwind, compiler-rt builtins | Android NDK r29 (29.0.14206865) | Apache-2.0 WITH LLVM-exception (legacy parts: NCSA / MIT) | https://github.com/llvm/llvm-project |
 | Kenney Input Prompts | 1.5A | CC0 1.0 | https://www.kenney.nl |
+| Luckiest Guy font | Regular (Google Fonts) | Apache-2.0 | https://fonts.google.com/specimen/Luckiest+Guy |
 
 ---
 
@@ -286,6 +287,16 @@ Notes:
 - Upstream: https://github.com/llvm/llvm-project. `libc++_shared.so` is shipped as provided by the
   Android NDK r29 (29.0.14206865); small parts of libunwind and compiler-rt are linked into each
   native library by the NDK toolchain.
+
+### Luckiest Guy font
+
+- License: Apache-2.0 (text: [Apache License 2.0](#apache-license-20); also in
+  `smstrikers-port/extern/fonts/LuckiestGuy-LICENSE.txt`). No NOTICE file.
+- Copyright (c) 2010 by Brian J. Bonislawsky DBA Astigmatic (AOETI).
+- Upstream: https://fonts.google.com/specimen/Luckiest+Guy. The font file
+  (`smstrikers-port/extern/fonts/LuckiestGuy-Regular.ttf`) is embedded unmodified in `libmain.so` as
+  data (`src/platform/xr_font_luckiest.h`) and drawn with Dear ImGui's copy of stb_truetype for the
+  goal banner.
 
 ### Kenney Input Prompts
 
@@ -672,13 +683,14 @@ Applies, with these copyright lines, to:
 - Abseil (both copies): Copyright 2017-2024 The Abseil Authors; Copyright 2016 Google Inc.
 - SPIRV-Tools (inside Dawn): Copyright The Khronos Group Inc., Google Inc. / Google LLC and other
   SPIRV-Tools contributors
+- Luckiest Guy font: Copyright (c) 2010 by Brian J. Bonislawsky DBA Astigmatic (AOETI)
 - Khronos OpenXR loader: Copyright (c) 2017-2026 The Khronos Group Inc.; Copyright (c) 2017-2019
   Valve Corporation; Copyright (c) 2017-2019 LunarG, Inc.; Copyright (c) 2019 Collabora, Ltd.
 - LLVM libc++, libc++abi, libunwind, compiler-rt builtins: LLVM Project contributors (together with
   the LLVM Exceptions below)
 
 NOTICE files: none of these components distributes a NOTICE file with the version used here
-(checked: the Abseil 20240722.0 source tree, the OpenXR loader 1.1.63 package and the OpenXR-SDK
+(checked: the Abseil 20240722.0 source tree, the Luckiest Guy font package, the OpenXR loader 1.1.63 package and the OpenXR-SDK
 source tree, and the LLVM notices in Android NDK r29), so there is no NOTICE content to reproduce.
 For SPIRV-Tools, see "Not included / uncertain".
 

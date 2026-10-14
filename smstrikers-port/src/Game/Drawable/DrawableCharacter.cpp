@@ -117,6 +117,8 @@ static unsigned long WhiteTexture = glGetTexture("global/white");
 int g_nShowBones;
 
 unsigned char DrawableCharacter::sShadowRenderingDisabled;
+bool DrawableCharacter::sXrOwnMatrix = false;  // strikers-quest r42
+nlMatrix4 DrawableCharacter::sXrIdentity;
 cCharacter* DrawableCharacter::spRenderOnlyThisCharacter = nullptr;
 bool DrawableCharacter::sbRenderOpposingGoalieToo = false;
 bool DrawableCharacter::sSTSLighting = false;
@@ -697,7 +699,9 @@ void DrawableCharacter::SendToGl(const cCharacter& character) const
     }
 
     GLSkinMesh* skinMesh = character.GetSkinMesh();
-    skinMesh->PrepareToRender(program, nullptr);
+    // strikers-quest r42: the life-size scorer (XrScorer.cpp) passes an identity "reflection", which
+    // gives its packets a matrix handle of their own, the one the scorer eye pass draws alone.
+    skinMesh->PrepareToRender(program, sXrOwnMatrix ? &sXrIdentity : nullptr);
 
     if (ec == DONKEYKONG || ec == MYSTERY)
     {
@@ -743,7 +747,7 @@ void DrawableCharacter::SendToGl(const cCharacter& character) const
     glModel* pModel = glModelDup(skinMesh->pModel, true);
 
     bool isVisible;
-    if (nlTaskManager::m_pInstance->m_CurrState == 0x100)
+    if (nlTaskManager::m_pInstance->m_CurrState == 0x100 || sXrOwnMatrix)  // r42: the scorer is never the camera's
     {
         isVisible = 1;
     }

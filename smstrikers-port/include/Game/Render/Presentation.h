@@ -83,6 +83,14 @@ public:
     /* 0x98 */ const char* mQueuedFunction;
     /* 0x9C */ bool mIsAllowedToSkip[4];
     /* 0xA0 */ HighlightQuality mGoalQuality;
-}; // total size: 0xA4
+
+    // strikers-quest r42: the post-goal show (the life-size scorer, xr_quest.cpp). Lockstep game
+    // frames since the goal script started (-1 = none), whether the replay is held (repeated) until
+    // PORT_GOAL_SHOW_FRAMES (no Super Strike, not skipped), and the replay passes added so far.
+    int mGoalShowFrames;
+    bool mGoalShowHold;
+    bool mGoalShowHoldNext;  // for the goal script about to start
+    int mGoalReplayLoops;
+};
 
 #endif // _PRESENTATION_H_

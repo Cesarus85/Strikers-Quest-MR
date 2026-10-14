@@ -66,6 +66,30 @@ int PortXrTakeTestItem(void);
 void PortXrSetStsMeter(int shown, float x, float y, float z, float halfU, float halfV);
 /* Self-test (xr_fx "sts"): 1 once when PortCelebrationPoll should show the meter for 3 s. */
 int PortXrTakeTestSts(void);
+
+/* r42: the post-goal show, the life-size scorer (Lance: every goal but a Super Strike; the replay
+ * keeps going until it is over). Presentation.cpp holds the goal replay until this many lockstep
+ * game frames after the goal script starts; the headset times the scorer's run-up, celebration and
+ * run-back to fit inside it. A compile-time constant: both headsets of an online match must agree. */
+#define PORT_GOAL_SHOW_FRAMES 690
+/* The show's timeline, seconds after the goal script starts (both XrScorer.cpp, which poses the
+ * scorer, and xr_quest.cpp, which places it, follow it): appears and runs over, arrives beside you,
+ * celebrates, runs back, gone. It runs at PORT_SCORER_SPEED (m/s) and stands PORT_SCORER_HEIGHT m. */
+#define PORT_SCORER_APPEAR 1.2f
+#define PORT_SCORER_ARRIVE 3.8f
+#define PORT_SCORER_LEAVE 9.0f
+#define PORT_SCORER_RUNOUT 2.3f
+#define PORT_SCORER_SPEED 2.6f
+#define PORT_SCORER_HEIGHT 1.52f
+/* xr_scorer.cpp, every game frame: phase 0 hidden, 1 running over, 2 celebrating, 3 running back;
+ * seconds into that phase; the character's own height in game units (scaled to PORT_SCORER_HEIGHT);
+ * who (eCharacterClass), the side that scored (0 home / 1 away) and its captain (team colours). */
+void PortXrScorerFrame(int phase, float phaseTime, float height, int characterClass, int side, int captainClass);
+/* r43d, xr_scorer.cpp, just before each PortXrScorerFrame: the scorer's goals and assists this game
+ * (goals < 0: unknown) and whether this goal is its third regular one (the hat trick). */
+void PortXrScorerStats(int goals, int assists, int hatTrick);
+/* PortCelebrationPoll, every game frame: the game is paused (the crowd volume panel shows). */
+void PortXrSetPaused(int paused);
 /* Fielder.cpp UseTeamPowerup, for the log: the team's items (ePowerUpType) and whether the
  * player's state refused it. */
 void PortXrNoteItemUse(int current, int next, int blocked);

@@ -33,6 +33,7 @@
 #include "NL/gl/glModify.h"
 #include "NL/gl/glState.h"
 #include "NL/gl/glTexture.h"
+#include "port/xr_scorer.h" // strikers-quest r42
 
 class PhotoFlash
 {
@@ -282,6 +283,7 @@ void GameRenderTask::Run(float fDeltaT)
     if (nlTaskManager::m_pInstance->m_CurrState != 4)
     {
         ReplayManager::Instance()->RenderSnapshotAt(fDeltaT);
+        XrScorerRender(); // strikers-quest r42: the life-size goal scorer's own copy
     }
 
     gl_ModifyClearMappings();

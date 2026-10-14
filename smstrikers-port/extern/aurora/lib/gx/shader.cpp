@@ -1158,7 +1158,21 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
                                   attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
   }
 
-  if (config.lineMode == 0) {
+  if (config.lineMode == 0 && config.stereo) {
+    // strikers-quest r43: single-pass stereo. Everything is computed from the centre view; only the
+    // position moves into the eye being encoded (instance index = eye) and its clip x/y are remapped
+    // to that eye's frustum (shader_info.cpp fill_uniform's stereo tail).
+    vtxInAttrs += ",\n    @builtin(instance_index) stereo_iidx: u32";
+    vtxXfrAttrsPre += fmt::format(
+        "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+        "\n    let stereo_eye = stereo_iidx & 1u;"
+        "\n    let stereo_pos = vec4f(mv_pos, 1.0) * ubuf.stereo_t[stereo_eye];"
+        "\n    let centre_clip = vec4f(stereo_pos, 1.0) * ubuf.proj;"
+        "\n    let stereo_fix = ubuf.stereo_clip[stereo_eye];"
+        "\n    out.pos = vec4f(centre_clip.x * stereo_fix.x + centre_clip.w * stereo_fix.y,"
+        "\n                    centre_clip.y * stereo_fix.z + centre_clip.w * stereo_fix.w, centre_clip.zw);",
+        vtx_attr(config, GX_VA_POS));
+  } else if (config.lineMode == 0) {
     vtxXfrAttrsPre += fmt::format(
         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
         "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
@@ -1734,6 +1748,12 @@ std::string build_shader_source(const ShaderConfig& config) noexcept {
         "@group(2) @binding({2})\n"
         "var tex{0}_samp: sampler;",
         i, i * 2, i * 2 + 1);
+  }
+  if (config.lineMode == 0 && config.stereo) {
+    // strikers-quest r43: last, after every other field (fill_uniform appends it last).
+    uniBufAttrs +=
+        "\n    stereo_t: array<mat3x4f, 2>,"
+        "\n    stereo_clip: array<vec4f, 2>,";
   }
   if (!prevColorNormalized && !prevAlphaNormalized) {
     fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";

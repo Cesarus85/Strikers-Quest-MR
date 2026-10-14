@@ -58,6 +58,12 @@ struct ExternalPassTarget;
 void begin_offscreen(uint32_t width, uint32_t height, const ExternalPassTarget* external = nullptr);
 void end_offscreen();
 uint32_t get_sample_count() noexcept;
+// strikers-quest r43: the pass being recorded holds single-pass stereo draws; it is encoded once per
+// half of its double-wide target (encoding.cpp).
+void mark_current_pass_stereo() noexcept;
+// strikers-quest r43: GX_AURORA_XR_EYE_PASS (FIFO thread); see register_xr_eye_target in gfx.hpp.
+bool begin_xr_eye_pass(uint32_t slot, uint32_t samples);
+void end_xr_eye_pass();
 RenderTargetLayout get_render_target_layout() noexcept;
 void clear_caches() noexcept;
 

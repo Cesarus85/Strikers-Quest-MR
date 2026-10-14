@@ -29,16 +29,18 @@ using webgpu::g_device;
 using webgpu::g_graphicsConfig;
 
 GXState g_gxState{};
-std::atomic<bool> g_xrCoverage{false};
+std::atomic<int> g_xrCoverage{0};
 
 } // namespace aurora::gx
 
-// strikers-quest: see gx.hpp g_xrCoverage. Call only with the GX FIFO drained.
-extern "C" void aurora_gx_set_xr_coverage(bool enabled) {
-  if (aurora::gx::g_xrCoverage.exchange(enabled, std::memory_order_relaxed) != enabled) {
+// strikers-quest: see gx.hpp g_xrCoverage. Call only with the GX FIFO drained, or from the FIFO
+// thread itself (r43: GX_AURORA_XR_EYE_PASS).
+extern "C" void aurora_gx_set_xr_coverage_mode(int mode) {
+  if (aurora::gx::g_xrCoverage.exchange(mode, std::memory_order_relaxed) != mode) {
     aurora::gx::g_gxState.dirty |= aurora::gx::DirtyPipeline;  // the cached pipeline is the other kind
   }
 }
+extern "C" void aurora_gx_set_xr_coverage(bool enabled) { aurora_gx_set_xr_coverage_mode(enabled ? 1 : 0); }
 
 namespace aurora::gx {
 wgpu::BindGroup g_emptyTextureBindGroup;
@@ -121,7 +123,7 @@ wgpu::CompareFunction to_compare_function(GXCompare func) {
 }
 
 wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendFactor dstFac, GXLogicOp op,
-                                u32 dstAlpha) {
+                                u32 dstAlpha, bool depthWrite) {
   wgpu::BlendComponent colorBlendComponent;
   switch (mode) {
     DEFAULT_FATAL("unsupported blend mode {}", underlying(mode));
@@ -174,15 +176,17 @@ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendF
     break;
   }
   wgpu::BlendComponent alphaBlendComponent;
-  if (dstAlpha == XrCoverageDstAlpha) {
+  if (is_xr_coverage(dstAlpha)) {
     // Only a draw that lays down its own colour adds coverage. One that adds light (dst factor
     // ONE), only darkens or tints what is there (src factor ZERO / DSTCLR / INVDSTCLR: shadows,
     // multiply decals), subtracts, or writes nothing (logic NOOP: invisible planes) leaves the
     // coverage as it was; otherwise those came out as black shapes over passthrough (r16).
     const bool srcAddsColour = srcFac == GX_BL_ONE || srcFac == GX_BL_SRCALPHA || srcFac == GX_BL_INVSRCALPHA ||
                                srcFac == GX_BL_DSTALPHA || srcFac == GX_BL_INVDSTALPHA;
-    const bool solid = mode == GX_BM_NONE || (mode == GX_BM_LOGIC && op == GX_LO_COPY);
     const bool over = mode == GX_BM_BLEND && srcAddsColour && dstFac != GX_BL_ONE;
+    // r43b: over a drawn layer, a blended draw that writes depth is a surface (XrOverlayDstAlpha).
+    const bool solid = mode == GX_BM_NONE || (mode == GX_BM_LOGIC && op == GX_LO_COPY) ||
+                       (dstAlpha == XrOverlayDstAlpha && over && depthWrite);
     if (solid) {
       // Fully covered (the blend constant is 1, pipeline.cpp).
       alphaBlendComponent = {.operation = wgpu::BlendOperation::Add,
@@ -274,6 +278,10 @@ Vec2<uint32_t> logical_fb_size() noexcept {
   }
   return vi::configured_fb_size();
 }
+
+// strikers-quest r43: the headset switches stereo on only inside its eye pass (xr_quest.cpp); the
+// offscreen check keeps the EFB out even if a switch-off were ever missed.
+bool stereo_active() noexcept { return g_gxState.stereo.enabled && gfx::is_offscreen(); }
 
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept {
   if (g_gxState.viewportPolicy == AURORA_VIEWPORT_NATIVE) {
@@ -376,8 +384,8 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, ArrayRef<wgpu:
       .depthBiasSlopeScale = depthBiasSlopeScale,
       .depthBiasClamp = depthBiasClamp,
   };
-  const auto blendState =
-      to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp, config.dstAlpha);
+  const auto blendState = to_blend_state(config.blendMode, config.blendFacSrc, config.blendFacDst, config.blendOp,
+                                         config.dstAlpha, config.depthCompare && config.depthUpdate);
   const std::array colorTargets{wgpu::ColorTargetState{
       .format = g_graphicsConfig.surfaceConfiguration.format,
       .blend = &blendState,
@@ -496,8 +504,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   }
   const auto cullMode = config.shaderConfig.lineMode == 0 ? g_gxState.cullMode : GX_CULL_NONE;
   const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
-  const bool xrCoverage =
-      g_xrCoverage.load(std::memory_order_relaxed) && g_gxState.colorUpdate && cullMode != GX_CULL_ALL;
+  const int coverageMode = g_xrCoverage.load(std::memory_order_relaxed);
+  const bool xrCoverage = coverageMode != 0 && g_gxState.colorUpdate && cullMode != GX_CULL_ALL;
   config = {
       .msaaSamples = gfx::get_sample_count(),
       .shaderConfig = config.shaderConfig,
@@ -507,7 +515,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
       .blendFacSrc = g_gxState.blendFacSrc,
       .blendFacDst = g_gxState.blendFacDst,
       .blendOp = g_gxState.blendOp,
-      .dstAlpha = xrCoverage ? XrCoverageDstAlpha : g_gxState.dstAlpha,
+      .dstAlpha = xrCoverage ? (coverageMode == 2 ? XrOverlayDstAlpha : XrCoverageDstAlpha) : g_gxState.dstAlpha,
       .polygonOffsetBits = std::bit_cast<uint32_t>(polygonOffset),
       .polygonOffsetScaleBits = std::bit_cast<uint32_t>(polygonOffsetScale),
       .polygonOffsetClampBits = std::bit_cast<uint32_t>(g_gxState.clamp),

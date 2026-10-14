@@ -36,6 +36,17 @@ Four ways to watch the same match, switched any time by clicking the controller 
 
 And around the game:
 
+- **Two versions, Classic and Plus** (alpha 1.3 and newer): pick one with **Version** on the app's
+  first screen. **Classic** is the game as alpha 1.2 had it. **Plus** adds things that aren't in the
+  original game:
+  - **A life-size goal scorer**: whoever scores runs out into your room (or onto the stadium pitch),
+    stops out in front of you, and waves and dances while the replay screen rises above them.
+  - **A "GOAL SCORED BY" banner** over their head with their goals and assists in this game.
+  - **Hat tricks**: three regular goals by one player in one game and hats rain down all over the
+    field. (A Super Strike worth two counts towards the stats but not towards a hat trick.)
+  - **A longer goal replay** that keeps playing through the celebration.
+  - **A living crowd**: louder in close games, quieter in blowouts, a roar on every goal, and in the
+    stadium the crowd sounds come from where the stands are.
 - **Goal celebrations in 3D**: confetti in the scorer's colours plus their own piece (coins for
   Mario, hearts for Peach, bananas for Donkey Kong, and so on), confetti cannons, streamers, foil,
   pyro and fireworks, landing on your floor and on the table. In the Tabletop modes the goal replay
@@ -129,7 +140,8 @@ clicks**, so you can't do it by accident mid-match.
 | **Left stick: click twice fast** | Swap between **your room** (mixed reality, you see your real room) and **the stadium** (full VR, you're standing on the pitch) |
 | **Right stick: click twice fast** | Swap between the **big screen** and the **tabletop** (a mini 3D pitch you can walk around) |
 | **Right stick: click once** | Big screen: change its size (3 sizes) |
-| **Left stick: click once** | Tabletop: bring the table back in front of you |
+| **Left stick: click once** | Bring the table or the big screen back in front of you |
+| **Menu button** while paused, then the **right stick** | Crowd volume (0 to 10) |
 
 So there are four views, and you can mix them any way you like:
 
@@ -151,11 +163,17 @@ So there are four views, and you can mix them any way you like:
   else, the right grip swaps items as usual.
 - Lost the table? **Click the left stick once** and it comes back in front of you.
 
+### Moving the big screen (Jumbotron)
+
+The same grips work on the big screen: hold the **left grip** to move it, hold **both grips** and
+pull apart or twist to resize and turn it. Where you put it is remembered.
+
 A Bluetooth gamepad paired to the headset also works for offline play.
 
 ## Play online with a friend
 
-Both of you need the **same version** of the app, and your own game files.
+Both of you need the **same release** of the app, set to the **same version** (both Classic or both
+Plus), and your own game files.
 
 1. **One of you hosts:** press **Host an online match**. You get a 4-letter code. Tell it to your
    friend, then press **Start**.
@@ -222,15 +240,15 @@ More about online play:
 
 ## Known issues
 
-- **The Stadium modes run below the headset's refresh rate**, at roughly 40 to 48 frames a second.
-  The Jumbotron in your room and Tabletop · Living Room run at full speed. Offline, the game itself
-  still runs at its normal speed.
+- **Jumbotron · Stadium runs a little under 60 frames a second** (about 56 to 58), and Tabletop ·
+  Stadium can dip during goal replays and celebrations. The other modes run at a full 60. The game
+  itself always runs at its normal speed.
 - **Online, the slower headset sets the pace for both.** A headset that can't keep up in a 3D mode
   redraws its 3D view every other frame for the rest of that match.
 - **Online uses the Touch controllers only.** A Bluetooth gamepad's buttons are not sent to your
   friend, so don't use one in an online match.
-- **Both players need the same release of the app.** With different versions the two headsets
-  ignore each other and each plays offline. Players on different disc regions are untested.
+- **Both players need the same release of the app, and the same version (Classic or Plus).** With
+  different ones the two headsets ignore each other and each plays offline. Players on different disc regions are untested.
 - **The game's video clips don't play** (the intro and attract movies): this build has no video
   decoder. Everything else runs without them.
 - **Don't open the app from the Library during a match.** The panel comes up in front of the game

@@ -26,6 +26,7 @@
 
 // recording.cpp: bytes used so far in this frame's fixed pools (vertex, uniform, index, storage).
 extern "C" void aurora_gfx_pool_usage(uint32_t* usedBytes, size_t count);
+extern "C" void aurora_gx_set_xr_coverage_mode(int mode);  // gx.cpp; in-band from GX_AURORA_XR_EYE_PASS
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -178,6 +179,8 @@ struct FogRangeLutKey {
   f32 rangeCenter;
   f32 renderWidth;
   u32 targetWidth;
+  // strikers-quest r43: a double-wide single-pass stereo target; each half gets its own eye's table.
+  bool stereo = false;
 
   bool operator==(const FogRangeLutKey&) const = default;
 };
@@ -209,6 +212,14 @@ struct DrawCache {
   vertex_decode::Layout decodeLayout{};
   gfx::PipelineRef decodedRef{};
   bool decodedReady = false;
+  // strikers-quest r43: the single-pass stereo twins of this pipeline and of its decoded twin.
+  bool stereoChecked = false;
+  bool stereoFits = false;
+  gfx::PipelineRef stereoRef{};
+  bool stereoReady = false;
+  bool stereoDecodedQueued = false;
+  gfx::PipelineRef stereoDecodedRef{};
+  bool stereoDecodedReady = false;
 };
 DrawCache sDrawCache;
 
@@ -252,13 +263,16 @@ bool decode_candidate(GXPrimitive prim) noexcept {
 FogRangeLutKey fog_range_lut_key() noexcept {
   const auto& state = g_gxState.fog;
   const f32 logicalWidth = std::max(g_gxState.logicalViewport.width, 1.f);
-  const f32 renderWidth = std::max(g_gxState.renderViewport.width, 1.f);
+  // strikers-quest r43: in single-pass stereo the render viewport spans both eyes; one eye is half.
+  const bool stereo = stereo_active();
+  const f32 renderWidth = std::max(g_gxState.renderViewport.width * (stereo ? 0.5f : 1.f), 1.f);
   return {
       .rangeK = state.rangeK,
       .rangeCenter = ((static_cast<f32>(state.rangeCenter) - g_gxState.logicalViewport.left) / logicalWidth) * 2.f -
                      1.f + (g_gxState.renderViewport.left / renderWidth) * 2.f,
       .renderWidth = renderWidth,
       .targetWidth = gfx::get_render_target_size().x,
+      .stereo = stereo,
   };
 }
 
@@ -270,8 +284,11 @@ std::vector<f32> build_fog_range_lut(const FogRangeLutKey& key) {
   }
 
   std::vector<f32> lut(key.targetWidth);
+  const u32 halfWidth = std::max<u32>(key.targetWidth / 2, 1);
   for (u32 x = 0; x < key.targetWidth; ++x) {
-    const f32 screenX = ((static_cast<f32>(x) + 0.5f) / key.renderWidth) * 2.f - 1.f;
+    // strikers-quest r43: in a stereo target each half is one eye, read at the fragment's own x.
+    const u32 eyeX = key.stereo ? x % halfWidth : x;
+    const f32 screenX = ((static_cast<f32>(eyeX) + 0.5f) / key.renderWidth) * 2.f - 1.f;
     const f32 offset = screenX - key.rangeCenter;
     const f32 rangeIndex = std::clamp(9.f - std::abs(offset) * 9.f, 0.f, 9.f);
     const u32 lower = static_cast<u32>(rangeIndex);
@@ -777,6 +794,41 @@ static bool try_decode(const u8* vtxData, u16 vtxCount, DrawImmediateData& immed
   return true;
 }
 
+// strikers-quest r43: in a single-pass stereo pass, point the draw at the stereo twin of the pipeline
+// it would use (pulling or decoded) once that is built. False = draw with the mono pipeline: both
+// halves then show the centre view of this draw, which only lasts until the twin compiles.
+static bool try_stereo(bool decoded, gfx::PipelineRef& pipelineRef) noexcept {
+  auto& cache = sDrawCache;
+  if (!cache.stereoFits) {
+    return false;
+  }
+  if (decoded) {
+    if (!cache.stereoDecodedQueued) {
+      cache.stereoDecodedQueued = true;
+      PipelineConfig config = cache.config;
+      config.shaderConfig.decodedVtx = true;
+      config.shaderConfig.stereo = true;
+      cache.stereoDecodedRef = gfx::pipeline_ref(config);  // queues the build on first sight
+    }
+    if (!cache.stereoDecodedReady) {
+      cache.stereoDecodedReady = gfx::pipeline_ready(cache.stereoDecodedRef);
+      if (!cache.stereoDecodedReady) {
+        return false;
+      }
+    }
+    pipelineRef = cache.stereoDecodedRef;
+    return true;
+  }
+  if (!cache.stereoReady) {
+    cache.stereoReady = gfx::pipeline_ready(cache.stereoRef);
+    if (!cache.stereoReady) {
+      return false;
+    }
+  }
+  pipelineRef = cache.stereoRef;
+  return true;
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices, const u8* vtxData) noexcept {
   auto& state = g_gxState;
@@ -798,6 +850,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     cache.lineMode = lineMode;
     cache.hasPipeline = true;
     cache.decodeChecked = false;
+    cache.stereoChecked = false;
     state.dirty = (state.dirty & ~DirtyPipeline) | DirtyUniform;
     if (!hadPipeline || prevSampledTextures != cache.shaderInfo.sampledTextures ||
         prevSampledIndTextures != cache.shaderInfo.sampledIndTextures) {
@@ -810,6 +863,32 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   const bool decoded =
       vtxData != nullptr && vtxCount != 0 && decode_candidate(prim) && try_decode(vtxData, vtxCount, immediates, pipelineRef);
   sLastDrawDecoded = decoded;
+
+  // strikers-quest r43: single-pass stereo. Every draw in the eye pass makes it a stereo pass (encoded
+  // once per half); triangle draws whose uniform block has room carry the stereo tail and, once built,
+  // use the stereo pipeline. Lines and points stay mono (their expansion owns the instance index).
+  bool stereoTail = false;
+  bool stereoDraw = false;
+  if (stereo_active()) {
+    gfx::mark_current_pass_stereo();
+    if (lineMode == 0) {
+      if (!cache.stereoChecked) {
+        cache.stereoChecked = true;
+        cache.stereoFits = stereo_uniform_fits(cache.shaderInfo);
+        cache.stereoReady = false;
+        cache.stereoDecodedQueued = false;
+        cache.stereoDecodedReady = false;
+        if (cache.stereoFits) {
+          PipelineConfig config = cache.config;
+          config.shaderConfig.stereo = true;
+          cache.stereoRef = gfx::pipeline_ref(config);  // queues the build on first sight
+        }
+      }
+      stereoTail = cache.stereoFits;
+      stereoDraw = try_stereo(decoded, pipelineRef);
+    }
+  }
+
   if (!decoded) {
     for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
       if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
@@ -839,7 +918,15 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
 
   const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
   if (!uniformValid) {
-    cache.uniformRange = build_uniform(cache.shaderInfo);
+    if (stereoTail) {
+      // strikers-quest r43: the mono layout plus the stereo tail, so the block suits either pipeline.
+      ShaderInfo info = cache.shaderInfo;
+      info.stereo = true;
+      info.uniformSize += StereoUniformSize;
+      cache.uniformRange = build_uniform(info);
+    } else {
+      cache.uniformRange = build_uniform(cache.shaderInfo);
+    }
     state.dirty &= ~DirtyUniform;
   }
   if (cache.config.shaderConfig.fogRangeEnabled) {
@@ -869,12 +956,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .idxRange = idxRange,
       .uniformRange = cache.uniformRange,
       .immediateData = immediates,
+      .bindGroups = cache.bindGroups,
       .vtxCount = vtxCount,
       .indexCount = numIndices,
       .instanceCount = instanceCount,
-      .bindGroups = cache.bindGroups,
       // strikers-quest: the coverage mode lives in the pipeline config (gx.hpp g_xrCoverage).
-      .dstAlpha = cache.config.dstAlpha == XrCoverageDstAlpha ? XrCoverageDstAlpha : state.dstAlpha,
+      .dstAlpha = is_xr_coverage(cache.config.dstAlpha) ? cache.config.dstAlpha : state.dstAlpha,
+      .stereo = stereoDraw ? 1u : 0u,
   });
 }
 
@@ -1239,6 +1327,46 @@ void handle_aurora(Reader& reader) noexcept {
     gfx::insert_debug_marker(std::move(label));
   } else if (subCmd == GX_AURORA_DECODE_SCOPE) {
     sDecodeScope = reader.read<u8>() != 0;
+  } else if (subCmd == GX_AURORA_SET_STEREO) {
+    // strikers-quest r43: see GXState::stereo.
+    auto& stereo = g_gxState.stereo;
+    const bool enabled = reader.read<u8>() != 0;
+    if (enabled) {
+      for (int eye = 0; eye < 2; ++eye) {
+        std::array<Vec4<float>, 3> rows;
+        for (auto& row : rows) {
+          for (int c = 0; c < 4; ++c) {
+            row[c] = reader.read<f32>();
+          }
+        }
+        stereo.t[eye] = Mat3x4<float>{rows[0], rows[1], rows[2]};
+      }
+      for (int eye = 0; eye < 2; ++eye) {
+        for (int c = 0; c < 4; ++c) {
+          stereo.clip[eye][c] = reader.read<f32>();
+        }
+      }
+    }
+    stereo.enabled = enabled;
+    // The uniform block grows or loses its stereo tail; merging must not cross the switch.
+    g_gxState.dirty |= DirtyUniform;
+  } else if (subCmd == GX_AURORA_XR_EYE_PASS) {
+    // strikers-quest r43: the headset's eye pass, in-band (gfx.hpp register_xr_eye_target).
+    if (reader.read<u8>() != 0) {
+      const u8 slot = reader.read<u8>();
+      const u8 samples = reader.read<u8>();
+      const u8 coverage = reader.read<u8>();  // r43b: 0 off, 1 over passthrough, 2 over a drawn layer
+      gfx::set_offscreen_uses_native_logical_size(true);
+      if (gfx::begin_xr_eye_pass(slot, samples)) {
+        aurora_gx_set_xr_coverage_mode(coverage);
+      } else {
+        gfx::set_offscreen_uses_native_logical_size(false);
+      }
+    } else {
+      gfx::end_xr_eye_pass();
+      aurora_gx_set_xr_coverage_mode(0);
+      gfx::set_offscreen_uses_native_logical_size(false);
+    }
   }
 
   else {

@@ -32,10 +32,13 @@
 
 #include "xr_fx.h"  // goal celebration effects
 #include "xr_net.hpp" // online 1v1 (include/port/xr_net.h)
+#include "xr_text.h"  // r42: the goal banner and the crowd volume panel
 #include "../../include/port/xr_net.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -71,6 +74,14 @@ extern "C" unsigned long long aurora_xr_decoded_bytes(void);
 extern "C" unsigned long long aurora_xr_decoded_bytes_last_frame(void);
 // extern/aurora/lib/gx/gx.cpp: alpha = coverage for the eye passes over passthrough.
 extern "C" void aurora_gx_set_xr_coverage(bool enabled);
+// r43, dolphin/gx/GXAurora.h: single-pass stereo for the draws that follow (in the GX stream).
+extern "C" void GXAuroraSetStereo(unsigned char on, const float* tLeft, const float* tRight, const float* clipLeft,
+                                  const float* clipRight);
+// r43: the single-pass eye pass opened / closed in the GX stream (no FIFO drain at the start), and
+// the drain itself.
+extern "C" void GXAuroraXrEyePass(unsigned char begin, unsigned char slot, unsigned char samples,
+                                  unsigned char coverage);
+extern "C" void AuroraGXSync(void);
 // extern/aurora/lib/gfx/texture.cpp: anisotropic filtering for every mipmapped texture.
 extern "C" void aurora_xr_set_texture_anisotropy(unsigned int n);
 // src/platform/xr_layers.cpp: stadium objects the per-view culling left out since the last call,
@@ -81,6 +92,10 @@ void PortXrProbe();
 void PortXrSetStadiumEconomy(float minPx, float eyeHalfWidthPx, int skipTallField, int bothLayers);
 // Below: starts the celebration renderer when first needed.
 static void ensure_fx();
+// r42, below: your crowd volume (load, the mixer's crowd controls, the paused right stick).
+void load_crowd_level();
+void update_crowd_mix();
+void crowd_slider_input(float stickX);
 
 namespace {
 
@@ -150,6 +165,27 @@ constexpr ScreenPreset kScreenPresets[] = {
 };
 constexpr int kScreenPresetCount = sizeof(kScreenPresets) / sizeof(kScreenPresets[0]);
 constexpr int kDefaultScreenPreset = 1;
+constexpr float kScreenDrop = -0.1f;  // room screen: its centre this far below your eyes
+// r42: the same three sizes in the Stadium, where the room ones look tiny (from Charged r15).
+constexpr ScreenPreset kStadiumScreenPresets[] = {
+    {4.0f, 4.5f},
+    {6.0f, 6.0f},
+    {11.0f, 10.0f},
+};
+
+// r42: the Jumbotron screen by hand (Lance, after alpha 1.2; Charged r15's FreeScreen). One per
+// room (0 = your room, 1 = the Stadium), saved to xr_screens.txt in the app's folder.
+struct FreeScreen {
+  bool placed = false;
+  XrVector3f position{0.0f, 0.0f, 0.0f};  // centre, LOCAL
+  float yaw = 0.0f;                       // about +Y; 0 faces +Z
+  float width = 3.6f;
+  int grabHands = 0;                      // 1 left grip, 3 both grips
+  float gain = 1.0f;                      // hand motion -> screen motion (far screens move faster)
+  XrVector3f grabPos{}, grabHand{};
+  float twoDist = 1.0f, twoAngle = 0.0f, twoWidth = 3.6f, twoYaw = 0.0f;
+  XrVector3f twoPos{}, twoMid{};
+};
 
 // One game frame every 1/60 s, whatever the headset refreshes at.
 constexpr int64_t kGameTickNs = 16666667;
@@ -189,6 +225,11 @@ struct EyeImage {
   VkSemaphore dawnDone = VK_NULL_HANDLE;
   VkImageLayout dawnEndLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   bool accessOpen = false;
+  // r43: Dawn's access ended (release_eye_image), its end fence exported here, not yet blitted.
+  bool released = false;
+  int releaseFd = -1;  // ours (dup'ed); the import takes it
+  VkExternalSemaphoreHandleTypeFlagBits releaseFdType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+  bool releaseComplete = false;  // no fence because the work was already done
 };
 
 // The screen upload's staging buffer, command buffer and fence, two deep: the copy of game frame N
@@ -206,6 +247,16 @@ struct UploadSlot {
 };
 constexpr int kUploadSlots = 2;
 
+// r42: a picture drawn on the CPU (xr_text.cpp) shown as a quad layer of its own: the goal banner,
+// the crowd volume panel. Uploaded only when it changes.
+struct Panel {
+  XrSwapchain swapchain = XR_NULL_HANDLE;
+  std::vector<XrSwapchainImageVulkanKHR> images;
+  uint32_t width = 0, height = 0;
+  bool hasImage = false;
+  UploadSlot upload;
+};
+
 // Aurora's fixed staging pools (vertex, uniform, index, storage) that the eye re-sends fill.
 constexpr int kPools = 4;
 
@@ -217,7 +268,19 @@ struct StereoSlot {
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
   bool pending = false;
+  XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};  // r43: the views it was drawn for
+  // r43 split stadium (Tabletop · Stadium): the life-size stadium for one eye, its own layer.
+  EyeImage stadium;
+  int stadiumEye = -1;  // the eye drawn into it this frame, -1 none
+  bool mainDrawn = false;  // the table / scorer pass drew into eye[0] this frame
+  bool mainOverlay = false;  // ... with coverage alpha, over the split stadium
 };
+// r43, single pass: the slot's game frame is handed to the compositor when the render worker has
+// submitted it (aurora_xr_set_submit_callback), not after the game thread waits for that. Per slot:
+// 0 free, 1 drawn (waiting for its frame's submit), 2 Dawn's access ended (ready to blit).
+// Outside State, which is reset by assignment.
+std::atomic<uint32_t> g_slotState[kStereoSlots];
+std::atomic<uint32_t> g_slotFrame[kStereoSlots];  // the Aurora frame that drew it
 
 // Where the Tabletop field sits in the room (LOCAL space) and how big it is.
 struct Table {
@@ -304,6 +367,15 @@ struct State {
   uint64_t pendingTapR = 0;
   int screenPreset = kDefaultScreenPreset;
   bool tabletop = false;     // Jumbotron (false) or Tabletop (true)
+  // r42: the Jumbotron screen by hand, and where your head is (VIEW space, every input sync).
+  FreeScreen screens[2];
+  bool bringScreen = false;   // put the screen in front of you (left stick tap, size change)
+  bool prevGripL = false;
+  bool screensDirty = false;  // moved since the last save
+  bool holdRightGrip = false; // the right grip took part in a grab: no Z until it is let go
+  XrSpace view = XR_NULL_HANDLE;
+  XrPosef headPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+  bool headValid = false;
   unsigned long lastUnderruns = 0;
 
   // --- 3D modes ---
@@ -322,6 +394,31 @@ struct State {
   bool stereoThisFrame = false;       // glPlat re-sent the frame per eye this game frame
   int stereoLayers = 0;
   bool eyePassOpen[2] = {false, false};
+  // r43: single-pass stereo (default; STRIKERS_XR_SPS=0 = the r4-r42 send per eye). Each layer is
+  // sent once from the centre between the eyes into one double-wide image per slot (slot.eye[0]),
+  // and Aurora encodes it into both halves (gx.hpp GXState::stereo). The eye re-sends were the
+  // stadium modes' frame-rate limit: r42b measured ~13 ms of a ~23 ms game frame in them.
+  bool singlePass = true;
+  XrPosef centrePose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};  // this frame's single-pass view
+  XrFovf unionFov{};                  // ... and the field of view that holds both eyes'
+  float stereoT[2][12] = {};          // per eye: centre eye space -> that eye's (3x4, row-major)
+  float stereoClip[2][4] = {};        // per eye: clip x/y from the union projection (ax, bx, ay, by)
+  bool stereoOn = false;              // GXAuroraSetStereo(1) sent and not yet switched off
+  // r43 split stadium: in Tabletop · Stadium the life-size stadium is its own projection layer
+  // under the table's, drawn for one eye per game frame, left and right in turn (each eye 30 times
+  // a second, the compositor turning them with your head between); the table and players stay
+  // every frame. Measured: table alone 60, stadium alone ~53, both in one pass ~41-46 (GPU).
+  // xr_tune "stadiumsplit <0|1>".
+  bool stadiumSplit = true;
+  bool splitThisFrame = false;        // this game frame draws the stadium into slot.stadium
+  int stadiumNextEye = 0;
+  int openTarget = 0;                 // 0 none, 1 the main (wide) pass, 2 the stadium pass
+  XrSwapchain stadiumSwapchain[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+  std::vector<XrSwapchainImageVulkanKHR> stadiumImages[2];
+  XrCompositionLayerProjectionView stadiumViews[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+                                                      {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+  bool stadiumValid[2] = {false, false};  // that eye's stadium swapchain holds a drawn image
+  bool mainIsOverlay = false;         // the main projection layer was drawn over a split stadium
   XrCompositionLayerProjectionView projViews[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                                    {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
   bool hasProjection = false;         // projViews hold a submitted pair the compositor can reuse
@@ -334,12 +431,12 @@ struct State {
   // Pool guard: what one eye send of each layer kind costs in each pool (running estimate), the
   // layer kinds this frame sends, and the open per-layer measurement.
   uint32_t poolReserved[kPools] = {};
-  float perSend[2][kPools] = {};
+  float perSend[3][kPools] = {};  // per LayerKind (r42: + the scorer)
   // r38: the players' decoded vertices land in the vertex pool once per frame (in whichever send
   // draws them first), not once per send: kept out of perSend, counted once in layers_fit.
   unsigned long long decodedAtMeasure = 0;  // aurora_xr_decoded_bytes when the open window began
   float decodedPerFrame = 0.0f;             // bytes, rise at once / fall slowly
-  int frameLayerKind[2] = {0, 0};
+  int frameLayerKind[3] = {0, 0, 0};
   bool measuring = false;
   int measuringKind = 0;
   uint32_t measureStart[kPools] = {};
@@ -353,6 +450,7 @@ struct State {
   bool gameplayLive = false;          // the match is being played (not a cutscene/replay/menu)
   bool fxReady = false;               // the celebration renderer is up (started at the first goal)
   bool dropLogged = false;            // the jumbotron's down position was logged for this replay
+  float screenLift = 0.0f;            // r43c: meters the screen is raised over the scorer (eases)
   bool bringTable = false;            // put the Tabletop field in front of you (left stick tap)
   bool celebBuzz = false;             // this goal is the player's: buzz with the cannon waves
   bool testWipe = false;              // self-test: Game.cpp plays the white-flash wipe once
@@ -364,6 +462,36 @@ struct State {
     float game[3] = {0.0f, 0.0f, 0.0f};  // where the game hangs it, game units
     float halfU = 0.1f, halfV = 0.2f;    // its square in the middle of the picture
   } sts;
+  // r42: the life-size goal scorer. xr_scorer.cpp poses it and reports the show every game frame;
+  // this places it in the room: it runs over from the field to a spot beside you, celebrates facing
+  // you, and runs back.
+  struct {
+    int phase = 0;                    // 0 hidden, 1 running over, 2 celebrating, 3 running back
+    float phaseTime = 0.0f;
+    float height = 1.4f;              // the character's own height, game units
+    int cls = -1, side = 0, captainClass = -1;
+    uint64_t reportNs = 0;            // its last report (a game that stops reporting hides it)
+    bool planned = false;             // this show's path is set
+    XrVector3f spawn{}, spot{};       // LOCAL, on the floor
+    XrVector3f away{};                // unit, from the spot back toward the field
+    XrVector3f leaveFrom{};           // where the run back starts (a skip can start it early)
+    XrVector3f lastPos{};
+    float lastYaw = 0.0f;
+    int prevPhase = 0;
+    bool logged = false;
+    unsigned shows = 0;               // r43b: shows so far (which side it comes in from)
+    int statGoals = -1, statAssists = 0;  // r43d: its goals / assists this game (PortXrScorerStats)
+    bool statHatTrick = false;            // ... and this goal is its third regular one
+  } scorer;
+  Panel banner;                       // r42: "GOAL SCORED BY:" over the scorer
+  bool bannerBusy = false;            // its picture is being drawn (g_bannerPixels, g_bannerReady)
+  Panel slider;                       // r42: the crowd volume panel while paused
+  bool paused = false;
+  int crowdLevel = 6;                 // 0..10; 6 = the game's own loudness
+  uint64_t sliderShownUntilNs = 0;
+  uint64_t crowdRepeatNs = 0;         // right stick held: the next step
+  bool sliderPlaced = false;
+  XrPosef sliderPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
   float charScale = 1.5f;             // Tabletop: players drawn this much bigger (xr_tune "charscale")
   int msaaTable = 4;                  // eye-pass multisampling, table only / with the stadium layer
   int msaaStadium = 4;                // (1 or 4; xr_tune "msaa <table> <stadium>")
@@ -374,6 +502,8 @@ struct State {
   double loopIntervalEma = 0.0;       // ns between headset loop iterations, smoothed
   bool onlineHalfRate = false;        // online and too slow: 3D view every other game frame
   uint32_t onlineParity = 0;
+  bool stadiumHalf = false;           // r42b: Jumbotron · Stadium eyes every other frame (xr_tune)
+  uint32_t stadiumParity = 0;
   uint32_t prevItemButtons = 0;       // X / Y / Z last input sync, for the press log
   int buzzWave = 0;                   // cannon waves already buzzed
   uint32_t eyeViewMask = 0xFFFFFFFFu; // GLV views the eye sends may draw (self-test tuning)
@@ -396,6 +526,15 @@ struct State {
   uint64_t uploadNsSinceStats = 0;
 };
 State g;
+
+// r42: the goal banner's picture, drawn on a thread of its own (xr_text.cpp takes tens of ms).
+std::vector<uint8_t> g_bannerPixels;
+std::atomic<bool> g_bannerReady{false};
+constexpr uint32_t kBannerW = 1024, kBannerH = 560;  // r43d: 420 + the stats line
+constexpr uint32_t kSliderW = 640, kSliderH = 200;
+
+// xr_quest.cpp is built without include/ on its path: the mixer's crowd controls (port/audio.h).
+extern "C" void PortAudioSetCrowdUser(float gain, int spatial, float headYaw);
 
 // The latest game frame, written by the render worker inside aurora_end_frame's work, read on the
 // game thread once aurora::gfx::synchronize() has returned.
@@ -681,6 +820,12 @@ bool create_session() {
     g.stage = XR_NULL_HANDLE;
     XWARN("no STAGE space; assuming the floor is 1.6 m below the start pose");
   }
+  // r42: your head, in every mode (the eyes are only located in the 3D modes).
+  space.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+  if (XR_FAILED(xrCreateReferenceSpace(g.session, &space, &g.view))) {
+    g.view = XR_NULL_HANDLE;
+    XWARN("no VIEW space; the screen is brought to the start pose");
+  }
 
   // The eye images: the runtime's recommended size, scaled (STRIKERS_XR_EYE_SCALE) and kept to a
   // multiple of 8. Native size since r32 (Lance: the Tabletop looked grainy at 0.75; the eye passes
@@ -699,6 +844,11 @@ bool create_session() {
     g.eyeHeight = (static_cast<uint32_t>(configViews[0].recommendedImageRectHeight * scale) / 8) * 8;
     XLOG("eye images %ux%u (recommended %ux%u x %.2f)", g.eyeWidth, g.eyeHeight,
          configViews[0].recommendedImageRectWidth, configViews[0].recommendedImageRectHeight, scale);
+  }
+  {
+    const char* sps = std::getenv("STRIKERS_XR_SPS");
+    g.singlePass = !(sps != nullptr && sps[0] == '0');
+    XLOG("eye sends: %s", g.singlePass ? "single pass (both eyes per send)" : "one per eye");
   }
   return true;
 }
@@ -977,6 +1127,150 @@ bool near_table(const XrVector3f& p) {
   return std::fabs(gx) < 22.5f + margin && std::fabs(gy) < 13.5f + margin && dy > -0.12f && dy < 2.5f * s + 0.15f;
 }
 
+// --- r42: the Jumbotron screen by hand (after Charged r15) ---
+
+int screen_room() { return g.mrMode ? 0 : 1; }
+const ScreenPreset& screen_preset(int room) {
+  return room == 0 ? kScreenPresets[g.screenPreset] : kStadiumScreenPresets[g.screenPreset];
+}
+
+// The screen `distance` ahead of where you look (level), facing you. Without a head: straight ahead
+// of the start pose, which is where r41 and earlier always put it.
+void place_screen_ahead(FreeScreen& s, int room, const XrPosef* head) {
+  const ScreenPreset& preset = screen_preset(room);
+  float fx = 0.0f, fz = -1.0f;
+  XrVector3f from{0.0f, 0.0f, 0.0f};
+  if (head != nullptr) {
+    const XrQuaternionf& o = head->orientation;
+    fx = -(2 * (o.x * o.z + o.w * o.y));
+    fz = -(1 - 2 * (o.x * o.x + o.y * o.y));
+    const float len = std::max(1e-3f, std::sqrt(fx * fx + fz * fz));
+    fx /= len;
+    fz /= len;
+    from = head->position;
+  }
+  // Room: a little below eye level. Stadium: its centre about a meter above your eyes.
+  const float y = room == 0 ? from.y + kScreenDrop : std::max(from.y + 0.9f, g.floorY + 2.4f);
+  s.position = {from.x + fx * preset.distance, y, from.z + fz * preset.distance};
+  s.yaw = std::atan2(-fx, -fz);
+  s.width = preset.width;
+  s.grabHands = 0;
+  s.placed = true;
+}
+
+// xr_screens.txt beside the game's log and settings (STRIKERS_HOME, StrikersHome.java).
+std::string screens_path() {
+  const char* home = std::getenv("STRIKERS_HOME");
+  return std::string(home != nullptr && *home != '\0' ? home : "/storage/emulated/0/Strikers") + "/xr_screens.txt";
+}
+
+void save_screens() {
+  if (FILE* f = std::fopen(screens_path().c_str(), "w")) {
+    for (int room = 0; room < 2; ++room) {
+      const FreeScreen& s = g.screens[room];
+      std::fprintf(f, "%d %d %.3f %.3f %.3f %.4f %.3f\n", room, s.placed ? 1 : 0, s.position.x, s.position.y,
+                   s.position.z, s.yaw, s.width);
+    }
+    std::fclose(f);
+  }
+}
+
+// Where you left the screens last time. LOCAL starts where the session starts, so this is close as
+// long as you play from the same spot; a left stick tap brings a screen back in front of you.
+void load_screens() {
+  if (FILE* f = std::fopen(screens_path().c_str(), "r")) {
+    int room = 0, placed = 0;
+    float x = 0, y = 0, z = 0, yaw = 0, width = 0;
+    while (std::fscanf(f, "%d %d %f %f %f %f %f", &room, &placed, &x, &y, &z, &yaw, &width) == 7) {
+      if (room < 0 || room > 1 || !placed || !std::isfinite(x + y + z + yaw + width)) continue;
+      FreeScreen& s = g.screens[room];
+      s.placed = true;
+      s.position = {x, y, z};
+      s.yaw = yaw;
+      s.width = std::max(0.5f, std::min(40.0f, width));
+    }
+    std::fclose(f);
+    XLOG("screens: room (%.1f, %.1f, %.1f) %.1f m, stadium (%.1f, %.1f, %.1f) %.1f m", g.screens[0].position.x,
+         g.screens[0].position.y, g.screens[0].position.z, g.screens[0].width, g.screens[1].position.x,
+         g.screens[1].position.y, g.screens[1].position.z, g.screens[1].width);
+  }
+}
+
+// Lance's grab rule: the left grip moves the screen (from anywhere), both grips turn and resize it.
+// Returns true while the right grip is part of a two-hand grab.
+bool update_screen(bool gripL, bool gripR, bool haveL, bool haveR, const XrVector3f& handL,
+                   const XrVector3f& handR) {
+  const int room = screen_room();
+  FreeScreen& s = g.screens[room];
+  if (g.bringScreen && g.headValid) {
+    g.bringScreen = false;
+    place_screen_ahead(s, room, &g.headPose);
+    g.screensDirty = true;
+    XLOG("screen brought to (%.2f, %.2f, %.2f), %.1f m wide", s.position.x, s.position.y, s.position.z, s.width);
+  }
+  if (!s.placed) place_screen_ahead(s, room, nullptr);
+  int hands = 0;
+  if (gripL && haveL && (s.grabHands != 0 || !g.prevGripL)) {
+    hands = 1;
+    if (gripR && haveR) hands |= 2;
+  }
+  g.prevGripL = gripL;
+  if (hands != s.grabHands) {
+    if (hands == 0) {
+      g.screensDirty = true;
+    } else {
+      const XrVector3f& h = g.headPose.position;
+      const float dx = s.position.x - h.x, dy = s.position.y - h.y, dz = s.position.z - h.z;
+      s.gain = g.headValid ? std::max(1.0f, std::min(15.0f, std::sqrt(dx * dx + dy * dy + dz * dz) / 0.6f)) : 1.0f;
+    }
+    s.grabPos = s.position;
+    s.grabHand = handL;
+    if (hands & 2) {
+      const float dx = handR.x - handL.x, dz = handR.z - handL.z;
+      s.twoDist = std::max(0.05f, std::sqrt(dx * dx + dz * dz));
+      s.twoAngle = std::atan2(dx, dz);
+      s.twoWidth = s.width;
+      s.twoYaw = s.yaw;
+      s.twoPos = s.position;
+      s.twoMid = {0.5f * (handL.x + handR.x), 0.5f * (handL.y + handR.y), 0.5f * (handL.z + handR.z)};
+    }
+    s.grabHands = hands;
+  }
+  if (g.screensDirty && s.grabHands == 0) {
+    g.screensDirty = false;
+    save_screens();
+  }
+  if (s.grabHands & 2) {
+    const float dx = handR.x - handL.x, dz = handR.z - handL.z;
+    const float dist = std::max(0.05f, std::sqrt(dx * dx + dz * dz));
+    float turn = std::atan2(dx, dz) - s.twoAngle;
+    while (turn > 3.14159265f) turn -= 6.2831853f;
+    while (turn < -3.14159265f) turn += 6.2831853f;
+    s.width = std::max(0.5f, std::min(40.0f, s.twoWidth * dist / s.twoDist));
+    s.yaw = s.twoYaw + turn;
+    const XrVector3f mid{0.5f * (handL.x + handR.x), 0.5f * (handL.y + handR.y), 0.5f * (handL.z + handR.z)};
+    s.position = {s.twoPos.x + (mid.x - s.twoMid.x) * s.gain, s.twoPos.y + (mid.y - s.twoMid.y) * s.gain,
+                  s.twoPos.z + (mid.z - s.twoMid.z) * s.gain};
+    return true;
+  }
+  if (s.grabHands & 1) {
+    s.position = {s.grabPos.x + (handL.x - s.grabHand.x) * s.gain, s.grabPos.y + (handL.y - s.grabHand.y) * s.gain,
+                  s.grabPos.z + (handL.z - s.grabHand.z) * s.gain};
+  }
+  return false;
+}
+
+void place_free_screen(XrCompositionLayerQuad& quad, float aspect) {
+  const int room = screen_room();
+  FreeScreen& s = g.screens[room];
+  if (!s.placed) place_screen_ahead(s, room, nullptr);
+  const float half = 0.5f * s.yaw;
+  quad.pose.orientation = {0.0f, std::sin(half), 0.0f, std::cos(half)};
+  quad.pose.position = s.position;
+  quad.size.width = s.width;
+  quad.size.height = s.width * aspect;
+}
+
 void sync_input() {
   PADStatus status{};
   status.err = PAD_ERR_NONE;
@@ -1010,12 +1304,34 @@ void sync_input() {
       XrVector3f handL{}, handR{};
       const bool haveL = locate_hand(a.gripSpaceL, &handL);
       const bool haveR = locate_hand(a.gripSpaceR, &handR);
+      // r42: your head, for bringing the screen in front of you.
+      if (g.view != XR_NULL_HANDLE) {
+        XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+        if (XR_SUCCEEDED(xrLocateSpace(g.view, g.local, g.frameState.predictedDisplayTime, &head)) &&
+            (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
+            (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0) {
+          g.headPose = head.pose;
+          g.headValid = true;
+        }
+      }
       const bool gripR = get_float(a.squeezeR) > 0.5f;
       if (gripR && !g.prevGripR) {
         g.table.rightGrab = g.tabletop && !g.stereoFailed && haveR && near_table(handR);
       }
       if (!gripR) g.table.rightGrab = false;
-      if (gripR && !g.table.rightGrab) status.button |= PAD_TRIGGER_Z;
+      // r42: the Jumbotron screen (the big screen modes, and Tabletop when 3D failed).
+      const bool screenMode = !g.tabletop || g.stereoFailed;
+      const bool gripL = get_float(a.squeezeL) > 0.6f;
+      if (screenMode) {
+        update_screen(gripL, gripR, haveL, haveR, handL, handR);
+        // The left grip is busy with the screen: the right grip is not Z until it is let go.
+        if (g.screens[screen_room()].grabHands != 0) g.holdRightGrip = true;
+      } else {
+        g.prevGripL = gripL;
+        g.screens[screen_room()].grabHands = 0;
+      }
+      if (!gripR) g.holdRightGrip = false;
+      if (gripR && !g.table.rightGrab && !g.holdRightGrip) status.button |= PAD_TRIGGER_Z;
       g.prevGripR = gripR;
       const bool holdL = g.tabletop && get_float(a.squeezeL) > 0.6f;
       const int hands = (holdL && haveL ? 1 : 0) | (g.table.rightGrab && haveR ? 2 : 0);
@@ -1088,7 +1404,10 @@ void sync_input() {
         }
       }
       apply_stick(stickL, &status.stickX, &status.stickY);
-      apply_stick(get_vec2(a.stickR), &status.substickX, &status.substickY);
+      const XrVector2f stickR = get_vec2(a.stickR);
+      apply_stick(stickR, &status.substickX, &status.substickY);
+      crowd_slider_input(stickR.x);  // r42: while paused, the crowd volume
+      update_crowd_mix();
 
       // Stick clicks, the two buttons a GameCube pad never had. Double taps switch modes, so a
       // stray click mid-play does nothing:
@@ -1110,8 +1429,10 @@ void sync_input() {
       }
       if (g.pendingTapL != 0 && t - g.pendingTapL >= kDoubleTapNs) {
         g.pendingTapL = 0;
-        if (g.tabletop) {
+        if (g.tabletop && !g.stereoFailed) {
           g.bringTable = true;  // single left tap: the table comes to you
+        } else {
+          g.bringScreen = true;  // r42: or the big screen does
         }
       }
       if (clickR && !g.prevStickClickR) {
@@ -1125,9 +1446,13 @@ void sync_input() {
       }
       if (g.pendingTapR != 0 && t - g.pendingTapR >= kDoubleTapNs) {
         g.pendingTapR = 0;
-        g.screenPreset = (g.screenPreset + 1) % kScreenPresetCount;
-        XLOG("screen preset %d (%.1f m wide at %.1f m)", g.screenPreset, kScreenPresets[g.screenPreset].width,
-             kScreenPresets[g.screenPreset].distance);
+        if (!g.tabletop || g.stereoFailed) {
+          // r42: the next size, in front of you.
+          g.screenPreset = (g.screenPreset + 1) % kScreenPresetCount;
+          g.bringScreen = true;
+          XLOG("screen preset %d (%.1f m wide at %.1f m)", g.screenPreset, screen_preset(screen_room()).width,
+               screen_preset(screen_room()).distance);
+        }
       }
       g.prevStickClickL = clickL;
       g.prevStickClickR = clickR;
@@ -1407,25 +1732,158 @@ void upload_latest_frame() {
   g.uploadNsSinceStats += now_ns() - start;
 }
 
+// r42: a CPU picture (RGBA8, sRGB, premultiplied alpha) into a panel's own quad swapchain, made on
+// first use. Only when the picture changes (a goal's banner, a crowd volume step).
+bool panel_upload(Panel& p, const uint8_t* rgba, uint32_t width, uint32_t height) {
+  UploadSlot& u = p.upload;
+  if (p.swapchain == XR_NULL_HANDLE || p.width != width || p.height != height) {
+    if (p.swapchain != XR_NULL_HANDLE) xrDestroySwapchain(p.swapchain);
+    p.swapchain = XR_NULL_HANDLE;
+    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    info.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
+                      XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    info.format = g.swapchainFormat != 0 ? g.swapchainFormat : VK_FORMAT_R8G8B8A8_SRGB;
+    info.sampleCount = 1;
+    info.width = width;
+    info.height = height;
+    info.faceCount = 1;
+    info.arraySize = 1;
+    info.mipCount = 1;
+    if (!xr_ok(xrCreateSwapchain(g.session, &info, &p.swapchain), "xrCreateSwapchain(panel)")) {
+      return false;
+    }
+    uint32_t count = 0;
+    xrEnumerateSwapchainImages(p.swapchain, 0, &count, nullptr);
+    p.images.assign(count, XrSwapchainImageVulkanKHR{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+    xrEnumerateSwapchainImages(p.swapchain, count, &count,
+                               reinterpret_cast<XrSwapchainImageBaseHeader*>(p.images.data()));
+    p.width = width;
+    p.height = height;
+  }
+  if (u.cmd == VK_NULL_HANDLE) {
+    VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocInfo.commandPool = g.pool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (!vk_ok(vkAllocateCommandBuffers(g.device, &allocInfo, &u.cmd), "vkAllocateCommandBuffers(panel)") ||
+        !vk_ok(vkCreateFence(g.device, &fenceInfo, nullptr, &u.fence), "vkCreateFence(panel)")) {
+      return false;
+    }
+  }
+  if (u.pending) {
+    vkWaitForFences(g.device, 1, &u.fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(g.device, 1, &u.fence);
+    u.pending = false;
+  }
+  const size_t bytes = static_cast<size_t>(width) * height * 4;
+  if (!ensure_host_buffer(u.buffer, u.memory, u.mapped, u.size, bytes, "panel")) {
+    return false;
+  }
+  auto* dst = static_cast<uint8_t*>(u.mapped);
+  if (g.swapchainFormat == VK_FORMAT_B8G8R8A8_SRGB) {
+    for (size_t i = 0; i < bytes; i += 4) {
+      dst[i + 0] = rgba[i + 2];
+      dst[i + 1] = rgba[i + 1];
+      dst[i + 2] = rgba[i + 0];
+      dst[i + 3] = rgba[i + 3];
+    }
+  } else {
+    std::memcpy(dst, rgba, bytes);
+  }
+  uint32_t index = 0;
+  XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+  if (!xr_ok(xrAcquireSwapchainImage(p.swapchain, &acquire, &index), "xrAcquireSwapchainImage(panel)")) {
+    return false;
+  }
+  XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+  wait.timeout = XR_INFINITE_DURATION;
+  xr_ok(xrWaitSwapchainImage(p.swapchain, &wait), "xrWaitSwapchainImage(panel)");
+  VkCommandBuffer cmd = u.cmd;
+  vkResetCommandBuffer(cmd, 0);
+  VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkBeginCommandBuffer(cmd, &begin);
+  VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  toTransfer.image = p.images[index].image;
+  toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &toTransfer);
+  VkBufferImageCopy region{};
+  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.imageExtent = {width, height, 1};
+  vkCmdCopyBufferToImage(cmd, u.buffer, p.images[index].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+  VkImageMemoryBarrier toColor = toTransfer;
+  toColor.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  toColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  toColor.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  toColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+                       nullptr, 0, nullptr, 1, &toColor);
+  vkEndCommandBuffer(cmd);
+  VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  submit.commandBufferCount = 1;
+  submit.pCommandBuffers = &cmd;
+  if (vk_ok(vkQueueSubmit(g.queue, 1, &submit, u.fence), "vkQueueSubmit(panel)")) {
+    u.pending = true;
+  }
+  XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  xr_ok(xrReleaseSwapchainImage(p.swapchain, &release), "xrReleaseSwapchainImage(panel)");
+  p.hasImage = true;
+  return true;
+}
+
+// A panel standing at `pos`, `width` m wide, turned to face your head about the vertical.
+void place_panel(XrCompositionLayerQuad& quad, const Panel& p, const XrVector3f& pos, float width) {
+  quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;  // premultiplied
+  quad.space = g.local;
+  quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+  quad.subImage.swapchain = p.swapchain;
+  quad.subImage.imageRect.offset = {0, 0};
+  quad.subImage.imageRect.extent = {static_cast<int32_t>(p.width), static_cast<int32_t>(p.height)};
+  quad.subImage.imageArrayIndex = 0;
+  const float yaw = std::atan2(g.headPose.position.x - pos.x, g.headPose.position.z - pos.z);
+  quad.pose.orientation = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
+  quad.pose.position = pos;
+  quad.size.width = std::max(0.001f, width);
+  quad.size.height = std::max(0.001f, width * static_cast<float>(p.height) / static_cast<float>(p.width));
+}
+
 // ---------------------------------------------------------------------------------------------
 // 3D modes: eye images shared with Dawn, matrices, and the per-eye pass contract with glPlat.cpp
 // ---------------------------------------------------------------------------------------------
 
 // Which 3D layers the current mode draws. The flags match glPlat.cpp's XR_LAYER_*.
-enum LayerKind { kLayerStadium, kLayerTable };
+enum LayerKind { kLayerStadium, kLayerTable, kLayerScorer };
 constexpr int kFlagSkipActors = 1;
 constexpr int kFlagSkipSky = 2;
 constexpr int kFlagTable = 4;
+constexpr int kFlagScorer = 8;  // r42: the life-size scorer alone (glPlat.cpp XR_LAYER_SCORER)
 
 bool stereo_mode() { return g.tabletop || !g.mrMode; }
 
-int layer_count() {
+// r42: the life-size scorer is out (and was reported lately: a game that stops reporting hides it).
+bool scorer_shown() {
+  return g.scorer.phase != 0 && now_ns() - g.scorer.reportNs < 300000000ull && !g.stereoFailed;
+}
+// The modes with eye passes: the 3D modes, and every mode while the scorer is out.
+bool eye_mode() { return stereo_mode() || scorer_shown(); }
+
+int world_layers() {
   if (!stereo_mode()) return 0;
   if (g.tabletop && !g.mrMode) return 2;  // Tabletop · Stadium: the stadium around you, then the field
   return 1;                               // Tabletop · Living Room (field) or Jumbotron · Stadium (stadium)
 }
 
+int layer_count() { return world_layers() + (scorer_shown() ? 1 : 0); }
+
 LayerKind layer_kind(int layer) {
+  if (layer >= world_layers()) return kLayerScorer;  // r42: always last, over the world
   if (g.tabletop && g.mrMode) return kLayerTable;
   if (g.tabletop && !g.mrMode) return layer == 0 ? kLayerStadium : kLayerTable;
   return kLayerStadium;
@@ -1447,6 +1905,15 @@ M4 m4_mul(const M4& a, const M4& b) {
   for (int i = 0; i < 4; ++i)
     for (int j = 0; j < 4; ++j)
       for (int k = 0; k < 4; ++k) r.m[i][j] += a.m[i][k] * b.m[k][j];
+  return r;
+}
+
+// Inverse of a rotation + translation in the row form above.
+M4 m4_rigid_inverse(const M4& a) {
+  M4 r = m4_identity();
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j) r.m[i][j] = a.m[j][i];
+  for (int j = 0; j < 3; ++j) r.m[3][j] = -(a.m[3][0] * r.m[0][j] + a.m[3][1] * r.m[1][j] + a.m[3][2] * r.m[2][j]);
   return r;
 }
 
@@ -1536,6 +2003,133 @@ M4 stadium_model() {
 
 M4 table_model() { return m4_game_to_room(g.table.scale, g.table.yaw, g.table.position); }
 
+// --- r42: the life-size goal scorer in the room ---
+
+// Forward along the floor from a pose (unit, LOCAL x/z).
+void floor_forward(const XrPosef& pose, float* fx, float* fz) {
+  const XrQuaternionf& o = pose.orientation;
+  float x = -(2 * (o.x * o.z + o.w * o.y)), z = -(1 - 2 * (o.x * o.x + o.y * o.y));
+  const float len = std::max(1e-3f, std::sqrt(x * x + z * z));
+  *fx = x / len;
+  *fz = z / len;
+}
+
+// The yaw m4_game_to_room needs to turn the game's +X (a character's forward) onto (dx, dz).
+float yaw_facing(float dx, float dz) { return std::atan2(-dz, dx); }
+
+float turn_toward(float from, float to, float u) {
+  float d = to - from;
+  while (d > 3.14159265f) d -= 6.2831853f;
+  while (d < -3.14159265f) d += 6.2831853f;
+  return from + d * std::max(0.0f, std::min(1.0f, u));
+}
+
+// A show's path, from where you are when it starts: the spot is out in front (below the big screen,
+// or beyond the table), and the scorer comes from farther out, running in at PORT_SCORER_SPEED, and
+// leaves the same way.
+void plan_scorer() {
+  const XrPosef& head = g.headPose;
+  float fx = 0.0f, fz = -1.0f;
+  if (g.headValid) floor_forward(head, &fx, &fz);
+  // Turning a floor direction left by a (LOCAL: -Z forward, +X right).
+  auto rotate = [](float x, float z, float a, float* ox, float* oz) {
+    *ox = x * std::cos(a) + z * std::sin(a);
+    *oz = -x * std::sin(a) + z * std::cos(a);
+  };
+  // r43b (Lance: "stopping at or near center field (usually where the game screen is placed) and not
+  // getting so close"): the spot is out in front, toward the big screen (Jumbotron) or just beyond
+  // the table (Tabletop), never nearer than 2 m. r42 had it beside you at 1.5 m.
+  float tx = 0.0f, tz = 0.0f, want = 0.0f;
+  if (!g.tabletop || g.stereoFailed) {
+    const FreeScreen& s = g.screens[screen_room()];
+    if (s.placed) {
+      tx = s.position.x - head.position.x;
+      tz = s.position.z - head.position.z;
+    } else {
+      tx = fx * screen_preset(screen_room()).distance;
+      tz = fz * screen_preset(screen_room()).distance;
+    }
+    // A little in front of the screen, so it stands below it rather than inside it.
+    want = std::max(2.5f, std::min(g.mrMode ? 4.0f : 8.0f, std::sqrt(tx * tx + tz * tz) - 0.4f));
+  } else {
+    tx = g.table.position.x - head.position.x;
+    tz = g.table.position.z - head.position.z;
+    want = std::max(2.0f, std::min(4.5f, std::sqrt(tx * tx + tz * tz) + 0.9f));
+  }
+  const float tlen = std::sqrt(tx * tx + tz * tz);
+  float dx = fx, dz = fz;
+  if (tlen > 0.2f) {
+    dx = tx / tlen;
+    dz = tz / tlen;
+  }
+  g.scorer.spot = {head.position.x + dx * want, g.floorY, head.position.z + dz * want};
+  // It comes in from farther out, a little to one side (alternating per goal), and leaves that way.
+  const float side = (g.scorer.shows++ & 1) != 0 ? -1.0f : 1.0f;
+  float ax = 0.0f, az = 0.0f;
+  rotate(dx, dz, 0.35f * side, &ax, &az);
+  g.scorer.away = {ax, 0.0f, az};
+  const float run = PORT_SCORER_SPEED * (PORT_SCORER_ARRIVE - PORT_SCORER_APPEAR);
+  g.scorer.spawn = {g.scorer.spot.x + ax * run, g.floorY, g.scorer.spot.z + az * run};
+  g.scorer.planned = true;
+  XLOG("scorer: spot (%.2f, %.2f, %.2f) %.1f m out, from (%.2f, %.2f)", g.scorer.spot.x, g.scorer.spot.y,
+       g.scorer.spot.z, want, g.scorer.spawn.x, g.scorer.spawn.z);
+}
+
+// Where the scorer's feet are and which way it faces, now.
+void scorer_place(XrVector3f* pos, float* yaw) {
+  auto& sc = g.scorer;
+  const float runIn = PORT_SCORER_ARRIVE - PORT_SCORER_APPEAR;
+  // Facing you from where it stands.
+  auto toward_head = [&](const XrVector3f& p) {
+    return yaw_facing(g.headPose.position.x - p.x, g.headPose.position.z - p.z);
+  };
+  if (sc.phase == 1) {
+    const float u = std::max(0.0f, std::min(1.0f, sc.phaseTime / runIn));
+    *pos = {sc.spawn.x + (sc.spot.x - sc.spawn.x) * u, sc.spot.y, sc.spawn.z + (sc.spot.z - sc.spawn.z) * u};
+    const float run = yaw_facing(-sc.away.x, -sc.away.z);
+    // The last 0.35 s it turns to face you.
+    *yaw = turn_toward(run, toward_head(sc.spot), (sc.phaseTime - (runIn - 0.35f)) / 0.35f);
+  } else if (sc.phase == 2) {
+    *pos = sc.spot;
+    *yaw = toward_head(sc.spot);
+  } else {
+    const float t = sc.phaseTime;
+    *pos = {sc.leaveFrom.x + sc.away.x * PORT_SCORER_SPEED * t, sc.spot.y,
+            sc.leaveFrom.z + sc.away.z * PORT_SCORER_SPEED * t};
+    // A quick turn away first.
+    *yaw = turn_toward(toward_head(sc.leaveFrom), yaw_facing(sc.away.x, sc.away.z), t / 0.3f);
+  }
+  sc.lastPos = *pos;
+  sc.lastYaw = *yaw;
+}
+
+// r43c (Lance: "a separate drop down jumbotron for the replay like waaay above the head of the goal
+// scorer"): how far a screen centred at `center` must rise so that, seen from your head, its bottom
+// edge clears the scorer's banner. 0 when the screen is off to the side of the scorer.
+float screen_lift_over_scorer(const XrVector3f& center, float width, float height) {
+  const XrVector3f& head = g.headPose.position;
+  const float sx = g.scorer.spot.x - head.x, sz = g.scorer.spot.z - head.z;
+  const float qx = center.x - head.x, qz = center.z - head.z;
+  const float ds = std::sqrt(sx * sx + sz * sz), dq = std::sqrt(qx * qx + qz * qz);
+  if (ds < 0.5f || dq < 0.5f) return 0.0f;
+  const float bannerW = 1.1f * std::max(1.0f, ds / 2.5f);  // as drawn (below, PortXrEndFrame)
+  const float bannerTop = g.scorer.spot.y + PORT_SCORER_HEIGHT + 0.18f +
+                          bannerW * static_cast<float>(kBannerH) / static_cast<float>(kBannerW);
+  // Side by side already: the angle between them beats their half widths.
+  const float cosAngle = std::max(-1.0f, std::min(1.0f, (sx * qx + sz * qz) / (ds * dq)));
+  if (std::acos(cosAngle) > std::atan(0.5f * width / dq) + std::atan(0.5f * bannerW / ds)) return 0.0f;
+  const float bottomNeeded = head.y + (bannerTop - head.y + 0.3f) * dq / ds;
+  return std::max(0.0f, bottomNeeded - (center.y - 0.5f * height));
+}
+
+M4 scorer_model() {
+  XrVector3f pos{};
+  float yaw = 0.0f;
+  scorer_place(&pos, &yaw);
+  const float scale = PORT_SCORER_HEIGHT / std::max(0.2f, g.scorer.height);
+  return m4_game_to_room(scale, yaw, pos);
+}
+
 // A game point on the Tabletop field, in LOCAL space.
 XrVector3f table_point(float gx, float gy, float gz) {
   const M4 t = table_model();
@@ -1558,8 +2152,9 @@ uint32_t find_device_local(uint32_t typeBits) {
 
 // One exported eye image (TPVR's createExportedImage, trimmed). Same VkImageCreateInfo on both
 // sides; MUTABLE + a two-entry format list so Dawn can render through an RGBA8Unorm view of the
-// sRGB image while Adreno keeps its framebuffer compression.
-bool create_eye_image(EyeImage& out, VkFormat srgb, VkFormat unorm) {
+// sRGB image while Adreno keeps its framebuffer compression. r43: `width` is two eyes wide for
+// single-pass stereo.
+bool create_eye_image(EyeImage& out, VkFormat srgb, VkFormat unorm, uint32_t width) {
   const VkFormat viewFormats[2] = {srgb, unorm};
   VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
   formatList.viewFormatCount = 2;
@@ -1572,7 +2167,7 @@ bool create_eye_image(EyeImage& out, VkFormat srgb, VkFormat unorm) {
   ci.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
   ci.imageType = VK_IMAGE_TYPE_2D;
   ci.format = srgb;
-  ci.extent = {g.eyeWidth, g.eyeHeight, 1};
+  ci.extent = {width, g.eyeHeight, 1};
   ci.mipLevels = 1;
   ci.arrayLayers = 1;
   ci.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1636,7 +2231,7 @@ bool create_eye_image(EyeImage& out, VkFormat srgb, VkFormat unorm) {
     const wgpu::TextureFormat viewFormat = aurora::gfx::color_format();
     wgpu::TextureDescriptor tex{};
     tex.format = wgpu::TextureFormat::RGBA8UnormSrgb;
-    tex.size = {g.eyeWidth, g.eyeHeight, 1};
+    tex.size = {width, g.eyeHeight, 1};
     tex.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::RenderAttachment |
                 wgpu::TextureUsage::TextureBinding;
     tex.viewFormatCount = 1;
@@ -1684,7 +2279,10 @@ bool create_stereo_resources() {
   if (g.eyeWidth == 0 || g.eyeHeight == 0) return fail("no eye size from the runtime");
   if (aurora::gfx::color_format() != wgpu::TextureFormat::RGBA8Unorm) return fail("scene format is not RGBA8Unorm");
 
-  for (int eye = 0; eye < 2; ++eye) {
+  // r43: single pass also gets the split stadium's own pair of swapchains.
+  for (int i = 0; i < (g.singlePass ? 4 : 2); ++i) {
+    XrSwapchain& chain = i < 2 ? g.eyeSwapchain[i] : g.stadiumSwapchain[i - 2];
+    std::vector<XrSwapchainImageVulkanKHR>& images = i < 2 ? g.eyeImages[i] : g.stadiumImages[i - 2];
     XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
                       XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
@@ -1695,21 +2293,40 @@ bool create_stereo_resources() {
     info.faceCount = 1;
     info.arraySize = 1;
     info.mipCount = 1;
-    if (!xr_ok(xrCreateSwapchain(g.session, &info, &g.eyeSwapchain[eye]), "xrCreateSwapchain(eye)")) {
+    if (!xr_ok(xrCreateSwapchain(g.session, &info, &chain), "xrCreateSwapchain(eye)")) {
       return fail("eye swapchain");
     }
     uint32_t count = 0;
-    xrEnumerateSwapchainImages(g.eyeSwapchain[eye], 0, &count, nullptr);
-    g.eyeImages[eye].assign(count, XrSwapchainImageVulkanKHR{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
-    xrEnumerateSwapchainImages(g.eyeSwapchain[eye], count, &count,
-                               reinterpret_cast<XrSwapchainImageBaseHeader*>(g.eyeImages[eye].data()));
+    xrEnumerateSwapchainImages(chain, 0, &count, nullptr);
+    images.assign(count, XrSwapchainImageVulkanKHR{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+    xrEnumerateSwapchainImages(chain, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
   }
   for (uint32_t s = 0; s < kStereoSlots; ++s) {
     StereoSlot& slot = g.slots[s];
-    for (int eye = 0; eye < 2; ++eye) {
-      if (!create_eye_image(slot.eye[eye], VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM)) {
+    // r43: single pass = one image two eyes wide (eye[0]); eye[1] stays empty.
+    for (int eye = 0; eye < (g.singlePass ? 1 : 2); ++eye) {
+      const uint32_t width = g.singlePass ? 2 * g.eyeWidth : g.eyeWidth;
+      if (!create_eye_image(slot.eye[eye], VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, width)) {
         return fail("eye image");
       }
+    }
+    if (g.singlePass) {
+      // r43: the eye pass opens in the GX stream (GXAuroraXrEyePass), so Aurora keeps the target:
+      // slot s's wide image as target s, its split-stadium image (one eye) as target 2 + s.
+      if (!create_eye_image(slot.stadium, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, g.eyeWidth)) {
+        return fail("stadium image");
+      }
+      aurora::gfx::ExternalPassTarget target;
+      target.texture = slot.eye[0].texture;
+      target.view = slot.eye[0].renderView;
+      target.format = aurora::gfx::color_format();
+      target.width = 2 * g.eyeWidth;
+      target.height = g.eyeHeight;
+      aurora::gfx::register_xr_eye_target(s, target);
+      target.texture = slot.stadium.texture;
+      target.view = slot.stadium.renderView;
+      target.width = g.eyeWidth;
+      aurora::gfx::register_xr_eye_target(2 + s, target);
     }
     VkCommandBufferAllocateInfo allocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     allocInfo.commandPool = g.pool;
@@ -1721,41 +2338,60 @@ bool create_stereo_resources() {
       return fail("slot sync objects");
     }
   }
-  XLOG("3D modes ready: %ux%u per eye, GPU-direct hand-off", g.eyeWidth, g.eyeHeight);
+  XLOG("3D modes ready: %ux%u per eye, GPU-direct hand-off, %s", g.eyeWidth, g.eyeHeight,
+       g.singlePass ? "single pass" : "pass per eye");
   return true;
 }
 
-// Dawn's end-of-access fence as a VkSemaphore the XR queue can wait on. False: no usable fence
-// (knownComplete says whether that is because the work is already done).
-bool import_dawn_fence(const wgpu::SharedTextureMemoryEndAccessState& end, VkSemaphore semaphore, bool* knownComplete) {
-  *knownComplete = false;
-  if (end.fenceCount == 0 || end.fences == nullptr) return false;
+// Ends Dawn's access to an eye image and keeps its end-of-access fence (a dup of the fd) for the
+// blit. All Dawn calls: on the game thread with the render worker idle (after synchronize), or, r43
+// single pass, on the render worker itself right after it submitted the frame (on_aurora_submit).
+void release_eye_image(EyeImage& img) {
+  wgpu::SharedTextureMemoryVkImageLayoutEndState layoutEnd{};
+  wgpu::SharedTextureMemoryEndAccessState endState{};
+  endState.nextInChain = &layoutEnd;
+  img.shared.EndAccess(img.texture, &endState);
+  img.accessOpen = false;
+  img.released = true;
+  img.dawnEndLayout = static_cast<VkImageLayout>(layoutEnd.newLayout);
+  img.releaseFd = -1;
+  img.releaseComplete = false;
+  if (endState.fenceCount == 0 || endState.fences == nullptr) return;
   wgpu::SharedFenceExportInfo typeQuery{};
-  end.fences[0].ExportInfo(&typeQuery);
+  endState.fences[0].ExportInfo(&typeQuery);
   int dawnFd = -1;
-  VkExternalSemaphoreHandleTypeFlagBits handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
   if (typeQuery.type == wgpu::SharedFenceType::SyncFD) {
     wgpu::SharedFenceSyncFDExportInfo info{};
     wgpu::SharedFenceExportInfo exportInfo{};
     exportInfo.nextInChain = &info;
-    end.fences[0].ExportInfo(&exportInfo);
+    endState.fences[0].ExportInfo(&exportInfo);
     dawnFd = info.handle;
+    img.releaseFdType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
     if (dawnFd < 0) {
-      *knownComplete = true;  // -1: already signaled
-      return false;
+      img.releaseComplete = true;  // -1: already signaled
+      return;
     }
   } else if (typeQuery.type == wgpu::SharedFenceType::VkSemaphoreOpaqueFD) {
     wgpu::SharedFenceVkSemaphoreOpaqueFDExportInfo info{};
     wgpu::SharedFenceExportInfo exportInfo{};
     exportInfo.nextInChain = &info;
-    end.fences[0].ExportInfo(&exportInfo);
+    endState.fences[0].ExportInfo(&exportInfo);
     dawnFd = info.handle;
-    handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    img.releaseFdType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
   } else {
-    return false;
+    return;
   }
-  if (dawnFd < 0) return false;
-  const int importFd = dup(dawnFd);  // Dawn keeps and closes its own; Vulkan takes ownership of ours
+  if (dawnFd >= 0) {
+    img.releaseFd = dup(dawnFd);  // Dawn keeps and closes its own; Vulkan takes ownership of ours
+  }
+}
+
+// The released image's fence as a VkSemaphore the XR queue can wait on. False: no usable fence
+// (knownComplete says whether that is because the work is already done).
+bool import_release_fence(EyeImage& img, VkSemaphore semaphore, bool* knownComplete) {
+  *knownComplete = img.releaseComplete;
+  const int importFd = img.releaseFd;
+  img.releaseFd = -1;
   if (importFd < 0) return false;
   static PFN_vkImportSemaphoreFdKHR importSemaphoreFd = nullptr;
   if (importSemaphoreFd == nullptr) {
@@ -1765,7 +2401,7 @@ bool import_dawn_fence(const wgpu::SharedTextureMemoryEndAccessState& end, VkSem
   VkImportSemaphoreFdInfoKHR info{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
   info.semaphore = semaphore;
   info.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
-  info.handleType = handleType;
+  info.handleType = img.releaseFdType;
   info.fd = importFd;
   if (importSemaphoreFd == nullptr || importSemaphoreFd(g.device, &info) != VK_SUCCESS) {
     close(importFd);
@@ -1774,9 +2410,11 @@ bool import_dawn_fence(const wgpu::SharedTextureMemoryEndAccessState& end, VkSem
   return true;
 }
 
-// Writes the left eye of `slot` to /storage/emulated/0/Strikers/xr_eye.ppm (self-test aid).
+// Writes the left eye of `slot` to /storage/emulated/0/Strikers/xr_eye.ppm (self-test aid). r43:
+// single pass writes both eyes side by side, so the right eye's view can be checked too.
 void dump_eye(StereoSlot& slot, const char* modeName) {
-  const VkDeviceSize bytes = static_cast<VkDeviceSize>(g.eyeWidth) * g.eyeHeight * 4;
+  const uint32_t width = g.singlePass ? 2 * g.eyeWidth : g.eyeWidth;
+  const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * g.eyeHeight * 4;
   if (!ensure_staging(bytes)) return;
   VkCommandBuffer cmd = g.cmd;
   vkResetCommandBuffer(cmd, 0);
@@ -1785,7 +2423,7 @@ void dump_eye(StereoSlot& slot, const char* modeName) {
   vkBeginCommandBuffer(cmd, &begin);
   VkBufferImageCopy region{};
   region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  region.imageExtent = {g.eyeWidth, g.eyeHeight, 1};
+  region.imageExtent = {width, g.eyeHeight, 1};
   vkCmdCopyImageToBuffer(cmd, slot.eye[0].image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g.staging, 1, &region);
   vkEndCommandBuffer(cmd);
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -1796,15 +2434,15 @@ void dump_eye(StereoSlot& slot, const char* modeName) {
   vkResetFences(g.device, 1, &g.fence);
   FILE* f = std::fopen("/storage/emulated/0/Strikers/xr_eye.ppm", "wb");
   if (f == nullptr) return;
-  std::fprintf(f, "P6\n%u %u\n255\n", g.eyeWidth, g.eyeHeight);
+  std::fprintf(f, "P6\n%u %u\n255\n", width, g.eyeHeight);
   const auto* px = static_cast<const uint8_t*>(g.stagingMapped);
-  std::vector<uint8_t> row(static_cast<size_t>(g.eyeWidth) * 3);
+  std::vector<uint8_t> row(static_cast<size_t>(width) * 3);
   // Over passthrough the alpha matters: composite like the compositor (premultiplied) over magenta,
   // so anything see-through shows pink.
-  const bool overBackground = g.mrMode;
+  const bool overBackground = g.mrMode || slot.mainOverlay;  // r43b: over the split stadium too
   for (uint32_t y = 0; y < g.eyeHeight; ++y) {
-    for (uint32_t x = 0; x < g.eyeWidth; ++x) {
-      const uint8_t* p = px + (static_cast<size_t>(y) * g.eyeWidth + x) * 4;
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint8_t* p = px + (static_cast<size_t>(y) * width + x) * 4;
       const int clear = overBackground ? 255 - p[3] : 0;
       row[x * 3 + 0] = static_cast<uint8_t>(std::min(255, p[0] + clear));
       row[x * 3 + 1] = p[1];
@@ -1813,34 +2451,69 @@ void dump_eye(StereoSlot& slot, const char* modeName) {
     std::fwrite(row.data(), 1, row.size(), f);
   }
   std::fclose(f);
-  XLOG("dumped left eye (%s) to xr_eye.ppm", modeName);
+  XLOG("dumped %s (%s) to xr_eye.ppm", g.singlePass ? "both eyes" : "left eye", modeName);
 }
 
-// After synchronize(): hands this frame's eye images back from Dawn and blits them into the eye
-// swapchains, gated on Dawn's fences. No CPU wait in the normal case.
-void finish_stereo_frame() {
-  StereoSlot& slot = g.slots[g.slot];
-  VkSemaphore waits[2];
+// Hands slot `s`'s eye images to the compositor: blits them into the eye swapchains, gated on Dawn's
+// fences (no CPU wait in the normal case). Images still in Dawn's access are released first (the
+// per-eye path, after synchronize()); r43 single pass finds them released by the render worker.
+void finish_stereo_frame(uint32_t s) {
+  StereoSlot& slot = g.slots[s];
+  VkSemaphore waits[3];
   uint32_t waitCount = 0;
   bool needCpuWait = false;
-  for (int eye = 0; eye < 2; ++eye) {
-    EyeImage& img = slot.eye[eye];
-    if (!img.accessOpen) continue;
-    wgpu::SharedTextureMemoryVkImageLayoutEndState layoutEnd{};
-    wgpu::SharedTextureMemoryEndAccessState endState{};
-    endState.nextInChain = &layoutEnd;
-    img.shared.EndAccess(img.texture, &endState);
-    img.accessOpen = false;
-    img.dawnEndLayout = static_cast<VkImageLayout>(layoutEnd.newLayout);
+  bool mainReleased = false, stadiumReleased = false;
+  EyeImage* images[3] = {&slot.eye[0], &slot.eye[1], &slot.stadium};
+  for (int i = 0; i < 3; ++i) {
+    EyeImage& img = *images[i];
+    if (img.accessOpen) release_eye_image(img);
+    if (!img.released) continue;
+    img.released = false;
+    (i < 2 ? mainReleased : stadiumReleased) = true;
     bool knownComplete = false;
-    if (import_dawn_fence(endState, img.dawnDone, &knownComplete)) {
+    if (import_release_fence(img, img.dawnDone, &knownComplete)) {
       waits[waitCount++] = img.dawnDone;
     } else if (!knownComplete) {
       needCpuWait = true;
     }
   }
+  // r43: what this frame drew. Single pass: the main (wide) image only if its pass ran (a split
+  // stadium frame can skip it), the split stadium for the one eye it was drawn for.
+  struct Blit {
+    EyeImage* img;
+    int32_t srcX;
+    int eye;
+    bool stadium;
+    uint32_t index;
+  };
+  Blit blits[3];
+  int blitCount = 0;
+  if (mainReleased && (!g.singlePass || slot.mainDrawn)) {
+    for (int eye = 0; eye < 2; ++eye) {
+      blits[blitCount++] = {g.singlePass ? &slot.eye[0] : &slot.eye[eye],
+                            g.singlePass ? eye * static_cast<int32_t>(g.eyeWidth) : 0, eye, false, 0};
+    }
+  }
+  if (stadiumReleased && slot.stadiumEye >= 0) {
+    blits[blitCount++] = {&slot.stadium, 0, slot.stadiumEye, true, 0};
+  }
+  if (blitCount == 0) {  // nothing new to show (the fences, if any, were imported and are dropped)
+    if (waitCount > 0) {
+      // A semaphore imported as temporary must still be waited on once before it is imported again.
+      VkSubmitInfo drop{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+      const VkPipelineStageFlags stages[3] = {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                              VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
+      drop.waitSemaphoreCount = waitCount;
+      drop.pWaitSemaphores = waits;
+      drop.pWaitDstStageMask = stages;
+      vkQueueSubmit(g.queue, 1, &drop, VK_NULL_HANDLE);
+    }
+    g_slotState[s].store(0, std::memory_order_release);
+    return;
+  }
   if (needCpuWait) {
     const uint64_t cpuWaitStart = now_ns();
+    aurora::gfx::synchronize();  // r43: the render worker may still be using Dawn (single pass)
     bool workDone = false;
     const auto future = aurora::webgpu::g_queue.OnSubmittedWorkDone(
         wgpu::CallbackMode::WaitAnyOnly, [&workDone](wgpu::QueueWorkDoneStatus, wgpu::StringView) { workDone = true; });
@@ -1848,14 +2521,14 @@ void finish_stereo_frame() {
     g.cpuWaitNs += now_ns() - cpuWaitStart;
   }
 
+  const auto chain_of = [](const Blit& b) { return b.stadium ? g.stadiumSwapchain[b.eye] : g.eyeSwapchain[b.eye]; };
   const uint64_t swapStart = now_ns();
-  uint32_t index[2] = {0, 0};
-  for (int eye = 0; eye < 2; ++eye) {
+  for (int i = 0; i < blitCount; ++i) {
     XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    xr_ok(xrAcquireSwapchainImage(g.eyeSwapchain[eye], &acquire, &index[eye]), "xrAcquireSwapchainImage(eye)");
+    xr_ok(xrAcquireSwapchainImage(chain_of(blits[i]), &acquire, &blits[i].index), "xrAcquireSwapchainImage(eye)");
     XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wait.timeout = XR_INFINITE_DURATION;
-    xr_ok(xrWaitSwapchainImage(g.eyeSwapchain[eye], &wait), "xrWaitSwapchainImage(eye)");
+    xr_ok(xrWaitSwapchainImage(chain_of(blits[i]), &wait), "xrWaitSwapchainImage(eye)");
   }
   g.swapNs += now_ns() - swapStart;
 
@@ -1863,9 +2536,13 @@ void finish_stereo_frame() {
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(slot.cmd, &begin);
-  for (int eye = 0; eye < 2; ++eye) {
-    EyeImage& img = slot.eye[eye];
-    const VkImage dst = g.eyeImages[eye][index[eye]].image;
+  for (int i = 0; i < blitCount; ++i) {
+    // r43: single pass reads both eyes from the halves of slot.eye[0]; its second half finds the
+    // image already moved to TRANSFER_SRC.
+    EyeImage& img = *blits[i].img;
+    const bool srcReady = i > 0 && blits[i - 1].img == blits[i].img;
+    const int eye = blits[i].eye;
+    const VkImage dst = (blits[i].stadium ? g.stadiumImages[eye] : g.eyeImages[eye])[blits[i].index].image;
     VkImageMemoryBarrier barriers[2]{};
     barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barriers[0].srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
@@ -1883,12 +2560,14 @@ void finish_stereo_frame() {
     barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barriers[1].image = dst;
     vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                         nullptr, 2, barriers);
+                         nullptr, srcReady ? 1 : 2, srcReady ? &barriers[1] : barriers);
     // A same-format blit is a byte copy, and records in microseconds where vkCmdCopyImage into the
     // runtime's gralloc image costs milliseconds on Adreno (TPVR's measurement).
+    const int32_t srcX = blits[i].srcX;
     VkImageBlit blit{};
     blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    blit.srcOffsets[1] = {static_cast<int32_t>(g.eyeWidth), static_cast<int32_t>(g.eyeHeight), 1};
+    blit.srcOffsets[0] = {srcX, 0, 0};
+    blit.srcOffsets[1] = {srcX + static_cast<int32_t>(g.eyeWidth), static_cast<int32_t>(g.eyeHeight), 1};
     blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     blit.dstOffsets[1] = {static_cast<int32_t>(g.eyeWidth), static_cast<int32_t>(g.eyeHeight), 1};
     vkCmdBlitImage(slot.cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1902,7 +2581,8 @@ void finish_stereo_frame() {
                          nullptr, 0, nullptr, 1, &toColor);
   }
   vkEndCommandBuffer(slot.cmd);
-  const VkPipelineStageFlags waitStages[2] = {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT};
+  const VkPipelineStageFlags waitStages[3] = {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                              VK_PIPELINE_STAGE_TRANSFER_BIT};
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit.waitSemaphoreCount = waitCount;
   submit.pWaitSemaphores = waits;
@@ -1912,25 +2592,71 @@ void finish_stereo_frame() {
   if (vk_ok(vkQueueSubmit(g.queue, 1, &submit, slot.fence), "vkQueueSubmit(eyes)")) {
     slot.pending = true;
   }
-  for (int eye = 0; eye < 2; ++eye) {
+  bool mainBlitted = false;
+  for (int i = 0; i < blitCount; ++i) {
+    const int eye = blits[i].eye;
     XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    xr_ok(xrReleaseSwapchainImage(g.eyeSwapchain[eye], &release), "xrReleaseSwapchainImage(eye)");
-    g.projViews[eye] = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
-    g.projViews[eye].pose = g.views[eye].pose;
-    g.projViews[eye].fov = g.views[eye].fov;
-    g.projViews[eye].subImage.swapchain = g.eyeSwapchain[eye];
-    g.projViews[eye].subImage.imageRect.offset = {0, 0};
-    g.projViews[eye].subImage.imageRect.extent = {static_cast<int32_t>(g.eyeWidth), static_cast<int32_t>(g.eyeHeight)};
-    g.projViews[eye].subImage.imageArrayIndex = 0;
+    xr_ok(xrReleaseSwapchainImage(chain_of(blits[i]), &release), "xrReleaseSwapchainImage(eye)");
+    XrCompositionLayerProjectionView& view = blits[i].stadium ? g.stadiumViews[eye] : g.projViews[eye];
+    view = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+    view.pose = slot.views[eye].pose;  // r43: what it was drawn for, maybe a frame ago
+    view.fov = slot.views[eye].fov;
+    view.subImage.swapchain = chain_of(blits[i]);
+    view.subImage.imageRect.offset = {0, 0};
+    view.subImage.imageRect.extent = {static_cast<int32_t>(g.eyeWidth), static_cast<int32_t>(g.eyeHeight)};
+    view.subImage.imageArrayIndex = 0;
+    if (blits[i].stadium) {
+      g.stadiumValid[eye] = true;
+    } else {
+      mainBlitted = true;
+    }
   }
-  g.hasProjection = true;
+  if (mainBlitted) {
+    g.hasProjection = true;
+    // Drawn over a split stadium: its alpha is coverage (the compositor blends it over).
+    g.mainIsOverlay = slot.mainOverlay;
+  }
 
-  if (g.dumpRequested) {
+  if (g.dumpRequested && mainBlitted) {
     g.dumpRequested = false;
     vkWaitForFences(g.device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
     dump_eye(slot, mode_name());
   }
-  g.slot = (g.slot + 1) % kStereoSlots;
+  g_slotState[s].store(0, std::memory_order_release);
+}
+
+// r43, single pass, on the render worker right after it submitted Aurora frame `frame`: the slot
+// that frame drew into ends Dawn's access here, so the game thread never waits for the render worker
+// to hand the eyes over (finish_stereo_frame blits it at the next display frame).
+void on_aurora_submit(uint32_t frame, void*) {
+  for (uint32_t s = 0; s < kStereoSlots; ++s) {
+    if (g_slotState[s].load(std::memory_order_acquire) != 1 ||
+        g_slotFrame[s].load(std::memory_order_relaxed) != frame) {
+      continue;
+    }
+    StereoSlot& slot = g.slots[s];
+    for (EyeImage* img : {&slot.eye[0], &slot.eye[1], &slot.stadium}) {
+      if (img->accessOpen) release_eye_image(*img);
+    }
+    g_slotState[s].store(2, std::memory_order_release);
+  }
+}
+
+// r43, single pass: blits every slot whose frame has been submitted, oldest first, so the newest
+// pair is what the compositor gets.
+void finish_released_slots() {
+  for (int pass = 0; pass < 2; ++pass) {
+    int oldest = -1;
+    for (uint32_t s = 0; s < kStereoSlots; ++s) {
+      if (g_slotState[s].load(std::memory_order_acquire) != 2) continue;
+      if (oldest < 0 || static_cast<int32_t>(g_slotFrame[s].load(std::memory_order_relaxed) -
+                                             g_slotFrame[oldest].load(std::memory_order_relaxed)) < 0) {
+        oldest = static_cast<int>(s);
+      }
+    }
+    if (oldest < 0) return;
+    finish_stereo_frame(static_cast<uint32_t>(oldest));
+  }
 }
 
 void set_perf_levels(int cpu, int gpu);
@@ -1997,6 +2723,12 @@ void poll_triggers() {
         g.lodMinPx = static_cast<float>(std::atof(line + 3));
       } else if (std::strncmp(line, "tallfield", 9) == 0) {
         g.skipTallField = std::atoi(line + 9) != 0;
+      } else if (std::strncmp(line, "stadiumsplit", 12) == 0) {
+        // r43 "stadiumsplit <0|1>": Tabletop · Stadium's stadium as its own layer, one eye a frame
+        g.stadiumSplit = std::atoi(line + 12) != 0;
+      } else if (std::strncmp(line, "stadiumhalf", 11) == 0) {
+        // "stadiumhalf <0|1>": Jumbotron · Stadium's eyes every other game frame (A/B)
+        g.stadiumHalf = std::atoi(line + 11) != 0;
       } else if (std::strncmp(line, "msaa", 4) == 0) {
         int table = 4, stadium = 4;
         std::sscanf(line + 4, "%d %d", &table, &stadium);
@@ -2300,9 +3032,12 @@ extern "C" int PortXrInit(void) {
     return 0;
   }
   create_passthrough();
+  load_screens();       // r42: where you left the big screens
+  load_crowd_level();   // r42: your crowd volume
 
   aurora_xr_set_surface_suppressed(true);
   aurora_xr_set_frame_callback(&on_aurora_frame, nullptr);
+  aurora_xr_set_submit_callback(&on_aurora_submit, nullptr);  // r43: single-pass eye hand-off
   // The immersive Activity's window is panel-sized (4128x2208 on Quest 3), and the port's render
   // target follows the window (launch.cpp PortFollowRenderScale) up to 3x: 2512x1344, read back
   // every frame. 2x is 896 rows, about 1600x896 on the 16:9 screen. A res_scale the player set wins.
@@ -2347,10 +3082,11 @@ namespace {
 constexpr double kPoolMargin = 1.25;
 
 bool layers_fit(const uint32_t used[kPools], const int* kinds, int count) {
+  const double sends = g.singlePass ? 1.0 : 2.0;  // r43: one send per layer for both eyes
   for (int p = 0; p < kPools; ++p) {
     if (g.poolReserved[p] == 0) continue;
     double need = used[p];
-    for (int l = 0; l < count; ++l) need += 2.0 * g.perSend[kinds[l]][p] * kPoolMargin;
+    for (int l = 0; l < count; ++l) need += sends * g.perSend[kinds[l]][p] * kPoolMargin;
     if (p == 0) need += g.decodedPerFrame * kPoolMargin;  // the decoded players, once per frame
     if (need > g.poolReserved[p] * 0.98) return false;
   }
@@ -2371,16 +3107,67 @@ void close_pool_measurement() {
   }
 }
 
+// r43: this frame's single-pass geometry. The send is made from the centre between the eyes with a
+// field of view holding both (the game culls against it). Each eye's own view is then a fixed move
+// in eye space, t = centre view^-1 * eye view (a layer's model cancels out, so one t serves every
+// layer), and each eye's frustum a remap of clip x and y: gx_projection gives x = sx * x_eye + ox *
+// z_eye and w = -z_eye, so an eye's x is (sx_e / sx_u) * x_u + (sx_e * ox_u / sx_u - ox_e) * w.
+void plan_single_pass() {
+  const XrPosef& left = g.views[0].pose;
+  const XrPosef& right = g.views[1].pose;
+  g.centrePose.orientation = left.orientation;  // the Quest's eyes share one; t carries any difference
+  g.centrePose.position = {(left.position.x + right.position.x) * 0.5f, (left.position.y + right.position.y) * 0.5f,
+                           (left.position.z + right.position.z) * 0.5f};
+  const XrFovf& fl = g.views[0].fov;
+  const XrFovf& fr = g.views[1].fov;
+  g.unionFov.angleLeft = std::min(fl.angleLeft, fr.angleLeft);
+  g.unionFov.angleRight = std::max(fl.angleRight, fr.angleRight);
+  g.unionFov.angleUp = std::max(fl.angleUp, fr.angleUp);
+  g.unionFov.angleDown = std::min(fl.angleDown, fr.angleDown);
+  float pu[16];
+  gx_projection(g.unionFov, 0.05f, 1500.0f, pu);
+  const M4 centreInv = m4_rigid_inverse(m4_view_from_pose(g.centrePose));
+  for (int eye = 0; eye < 2; ++eye) {
+    // Row form: p_eye = p_centre * d. GX takes the column form, 3x4 row-major: its rows are d's columns.
+    const M4 d = m4_mul(centreInv, m4_view_from_pose(g.views[eye].pose));
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 4; ++c) g.stereoT[eye][r * 4 + c] = d.m[c][r];
+    float pe[16];
+    gx_projection(g.views[eye].fov, 0.05f, 1500.0f, pe);
+    g.stereoClip[eye][0] = pe[0] / pu[0];
+    g.stereoClip[eye][1] = pe[0] * pu[2] / pu[0] - pe[2];
+    g.stereoClip[eye][2] = pe[5] / pu[5];
+    g.stereoClip[eye][3] = pe[5] * pu[6] / pu[5] - pe[6];
+  }
+}
+
+// r43: closes the open single-pass eye pass in the GX stream (stereo off first, after its last draw).
+void close_single_pass() {
+  if (g.openTarget == 0) return;
+  if (g.stereoOn) {
+    GXAuroraSetStereo(0, nullptr, nullptr, nullptr, nullptr);
+    g.stereoOn = false;
+  }
+  GXAuroraXrEyePass(0, 0, 0, 0);
+  g.openTarget = 0;
+  g.eyePassOpen[0] = false;
+}
+
 }  // namespace
 
 extern "C" int PortXrStereoFrameBegin(void) {
-  if (!g.active || !g.frameBegun || !g.viewsValid || !stereo_mode() || g.stereoFailed) {
+  if (!g.active || !g.frameBegun || !g.viewsValid || !eye_mode() || g.stereoFailed) {
     return 0;
   }
   // Online, a headset that cannot hold 60 game frames a second would slow the shared match down for
   // both (fixed step). Then its 3D view is redrawn every other game frame (the compositor reprojects
   // the last pair for head motion) and the match keeps its speed: presentation stays per player.
   if (PortNetOnline() && g.onlineHalfRate && (g.onlineParity++ & 1) != 0) {
+    return 0;
+  }
+  // r42b (A/B, xr_tune "stadiumhalf"): Jumbotron · Stadium, the stadium around you every other game
+  // frame; the compositor turns the last pair with your head between. Not while the scorer is out.
+  if (g.stadiumHalf && !g.tabletop && !g.mrMode && !scorer_shown() && (g.stadiumParity++ & 1) != 0) {
     return 0;
   }
   if (g.poolReserved[0] == 0) {
@@ -2393,20 +3180,23 @@ extern "C" int PortXrStereoFrameBegin(void) {
   }
   uint32_t used[kPools];
   aurora_gfx_pool_usage(used, kPools);
-  for (int k = 0; k < 2; ++k) {
+  for (int k = 0; k < 3; ++k) {
     if (g.perSend[k][0] == 0.0f) {
-      // Until measured: half of the game view's own send (r5/r6 eye sends were a quarter to a half).
-      for (int p = 0; p < kPools; ++p) g.perSend[k][p] = 0.5f * static_cast<float>(used[p]);
+      // Until measured: half of the game view's own send (r5/r6 eye sends were a quarter to a half);
+      // the scorer is one character, a tenth.
+      const float part = k == kLayerScorer ? 0.1f : 0.5f;
+      for (int p = 0; p < kPools; ++p) g.perSend[k][p] = part * static_cast<float>(used[p]);
     }
   }
-  int kinds[2] = {0, 0};
+  int kinds[3] = {0, 0, 0};
   int count = layer_count();
   for (int l = 0; l < count; ++l) kinds[l] = layer_kind(l);
-  if (!layers_fit(used, kinds, count) && count == 2) {
-    // Keep the field; the stadium estimate decays so the layer is tried (and measured) again.
-    for (int p = 0; p < kPools; ++p) g.perSend[kinds[0]][p] *= 0.98f;
-    kinds[0] = kinds[1];
-    count = 1;
+  if (!layers_fit(used, kinds, count) && count > 1 && kinds[0] == kLayerStadium) {
+    // Keep the field (and the scorer); the stadium estimate decays so the layer is tried (and
+    // measured) again.
+    for (int p = 0; p < kPools; ++p) g.perSend[kLayerStadium][p] *= 0.98f;
+    for (int l = 1; l < count; ++l) kinds[l - 1] = kinds[l];
+    --count;
     ++g.layersDroppedSinceStats;
   }
   if (!layers_fit(used, kinds, count)) {
@@ -2415,7 +3205,29 @@ extern "C" int PortXrStereoFrameBegin(void) {
   }
   g.frameLayerKind[0] = kinds[0];
   g.frameLayerKind[1] = kinds[1];
+  g.frameLayerKind[2] = kinds[2];
   StereoSlot& slot = g.slots[g.slot];
+  if (g_slotState[g.slot].load(std::memory_order_acquire) != 0) {
+    // r43 single pass: this slot's last frame (two game frames ago) is normally submitted and
+    // blitted by now; if not, wait for the render worker to submit it, then hand it over.
+    const uint64_t waitStart = now_ns();
+    while (g_slotState[g.slot].load(std::memory_order_acquire) == 1 && now_ns() - waitStart < 200000000ull) {
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    if (g_slotState[g.slot].load(std::memory_order_acquire) == 1) {
+      // Its submit was never seen (should not happen): end the access here, with Dawn idle.
+      XWARN("eye slot %u: frame %u never reported submitted", g.slot, g_slotFrame[g.slot].load());
+      aurora::gfx::synchronize();
+      for (EyeImage* img : {&slot.eye[0], &slot.eye[1], &slot.stadium}) {
+        if (img->accessOpen) release_eye_image(*img);
+      }
+      g_slotState[g.slot].store(2, std::memory_order_release);
+    }
+    finish_stereo_frame(g.slot);
+    g.eyeFenceNs += now_ns() - waitStart;
+  }
+  slot.views[0] = g.views[0];  // r43: what this frame's eyes are drawn for (finish_stereo_frame)
+  slot.views[1] = g.views[1];
   if (slot.pending) {
     // This slot's blit from two frames ago must be done before Dawn draws into its images again.
     const uint64_t fenceStart = now_ns();
@@ -2426,6 +3238,11 @@ extern "C" int PortXrStereoFrameBegin(void) {
   }
   for (int eye = 0; eye < 2; ++eye) {
     EyeImage& img = slot.eye[eye];
+    if (!img.shared) {  // r43: single pass has one image per slot
+      img.accessOpen = false;
+      g.eyePassOpen[eye] = false;
+      continue;
+    }
     // Dawn's Vulkan backend requires the layout chain. UNDEFINED both ways: every pixel is
     // rewritten each frame, so the previous contents may go.
     wgpu::SharedTextureMemoryVkImageLayoutBeginState layoutBegin{};
@@ -2437,18 +3254,85 @@ extern "C" int PortXrStereoFrameBegin(void) {
     img.accessOpen = static_cast<bool>(img.shared.BeginAccess(img.texture, &desc));
     g.eyePassOpen[eye] = false;
   }
+  // r43 split stadium: Tabletop · Stadium draws the stadium layer for one eye, in turn, into its own
+  // image and layer; the table (and scorer) go over it with coverage alpha.
+  g.splitThisFrame = g.singlePass && g.stadiumSplit && g.tabletop && !g.mrMode && count > 1 &&
+                     kinds[0] == kLayerStadium && slot.stadium.shared;
+  slot.stadiumEye = -1;
+  slot.mainDrawn = false;
+  slot.mainOverlay = g.splitThisFrame;
+  g.openTarget = 0;
+  if (g.splitThisFrame) {
+    wgpu::SharedTextureMemoryVkImageLayoutBeginState layoutBegin{};
+    layoutBegin.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    layoutBegin.newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    wgpu::SharedTextureMemoryBeginAccessDescriptor desc{};
+    desc.nextInChain = &layoutBegin;
+    desc.initialized = true;
+    slot.stadium.accessOpen = static_cast<bool>(slot.stadium.shared.BeginAccess(slot.stadium.texture, &desc));
+    if (slot.stadium.accessOpen) {
+      slot.stadiumEye = g.stadiumNextEye;
+      g.stadiumNextEye ^= 1;
+    } else {
+      g.splitThisFrame = false;
+      slot.mainOverlay = false;
+    }
+  }
+  if (g.singlePass) {
+    plan_single_pass();
+    // r43: in Dawn's access from here until the render worker has submitted this Aurora frame
+    // (on_aurora_submit), whether or not the eye pass ends up drawing.
+    g_slotFrame[g.slot].store(aurora_xr_current_frame(), std::memory_order_relaxed);
+    g_slotState[g.slot].store(1, std::memory_order_release);
+  }
   g.stereoLayers = count;
   g.stereoThisFrame = true;
   g.eyeSendStartNs = now_ns();
   return g.stereoLayers;
 }
 
+extern "C" int PortXrStereoSinglePass(void) { return g.singlePass ? 1 : 0; }
+
+// eye 0 / 1: that eye's send; eye 2 (r43 single pass): one send for both.
 extern "C" int PortXrStereoEyeLayer(int eye, int layer, float view[16], float proj[16], int* flags) {
-  if (!g.stereoThisFrame || eye < 0 || eye > 1) {
+  if (!g.stereoThisFrame || eye < 0 || eye > 2 || (eye == 2) != g.singlePass) {
     return 0;
   }
-  EyeImage& img = g.slots[g.slot].eye[eye];
-  if (layer == 0) {
+  const int idx = eye == 2 ? 0 : eye;  // the image / open pass
+  StereoSlot& slot = g.slots[g.slot];
+  EyeImage& img = slot.eye[idx];
+  // 4x multisampling smooths the edges (Lance: grainy Tabletop); per mode, xr_tune "msaa".
+  const bool stadiumLayer = !g.splitThisFrame && (g.frameLayerKind[0] == kLayerStadium ||
+                                                  (g.stereoLayers > 1 && g.frameLayerKind[1] == kLayerStadium));
+  const int samples = stadiumLayer ? g.msaaStadium : g.msaaTable;
+  const bool stadiumHere = g.splitThisFrame && layer >= 0 && layer < 3 && g.frameLayerKind[layer] == kLayerStadium;
+  if (g.singlePass) {
+    // r43: each layer goes into the main (wide, both eyes) pass or, split, the stadium's one-eye
+    // pass; passes open and close in the GX stream, with their native-unit viewports and coverage
+    // (Aurora does both when it gets there), so the game thread sends while the FIFO thread is
+    // still on the normal view instead of waiting for it.
+    const int want = stadiumHere ? 2 : 1;
+    if (g.openTarget != want) {
+      close_single_pass();
+      EyeImage& target = stadiumHere ? slot.stadium : slot.eye[0];
+      if (!target.accessOpen) {
+        return 0;
+      }
+      if (stadiumHere) {
+        GXAuroraXrEyePass(1, static_cast<unsigned char>(2 + g.slot), static_cast<unsigned char>(g.msaaStadium), 0);
+      } else {
+        // Over passthrough (1), or over the split stadium (2: solid objects drawn blended count as
+        // covered, r43b's see-through ball), the image's alpha is coverage.
+        GXAuroraXrEyePass(1, static_cast<unsigned char>(g.slot), static_cast<unsigned char>(samples),
+                          g.mrMode ? 1 : (g.splitThisFrame ? 2 : 0));
+        GXAuroraSetStereo(1, g.stereoT[0], g.stereoT[1], g.stereoClip[0], g.stereoClip[1]);
+        g.stereoOn = true;
+        slot.mainDrawn = true;
+      }
+      g.openTarget = want;
+      g.eyePassOpen[0] = true;
+    }
+  } else if (layer == 0) {
     if (!img.accessOpen) {
       return 0;
     }
@@ -2458,22 +3342,19 @@ extern "C" int PortXrStereoEyeLayer(int eye, int layer, float view[16], float pr
     target.format = aurora::gfx::color_format();
     target.width = g.eyeWidth;
     target.height = g.eyeHeight;
-    // 4x multisampling smooths the edges (Lance: grainy Tabletop); per mode, xr_tune "msaa".
-    const bool stadiumLayer = g.frameLayerKind[0] == kLayerStadium ||
-                              (g.stereoLayers > 1 && g.frameLayerKind[1] == kLayerStadium);
-    target.sampleCount = static_cast<uint32_t>(stadiumLayer ? g.msaaStadium : g.msaaTable);
+    target.sampleCount = static_cast<uint32_t>(samples);
     // The re-send sets its viewport in the game's native units; let them span the eye image.
     aurora::gfx::set_offscreen_uses_native_logical_size(true);
     if (!aurora::gfx::create_pass_external(target)) {
       aurora::gfx::set_offscreen_uses_native_logical_size(false);
       return 0;
     }
-    g.eyePassOpen[eye] = true;
+    g.eyePassOpen[idx] = true;
     // create_pass_external drained the GX FIFO: safe to switch Aurora's coverage mode, which makes
     // solid draws write alpha 1 so the field is solid over passthrough (gx.hpp g_xrCoverage).
     aurora_gx_set_xr_coverage(g.mrMode);
   }
-  if (!g.eyePassOpen[eye] || layer < 0 || layer > 1) {
+  if (!g.eyePassOpen[idx] || layer < 0 || layer >= g.stereoLayers || layer > 2) {
     return 0;
   }
   close_pool_measurement();
@@ -2493,18 +3374,34 @@ extern "C" int PortXrStereoEyeLayer(int eye, int layer, float view[16], float pr
     std::memcpy(g.measureStart, used, sizeof(used));
     g.decodedAtMeasure = aurora_xr_decoded_bytes();
   }
-  const M4 model = kind == kLayerTable ? table_model() : stadium_model();
-  const M4 v = m4_mul(model, m4_view_from_pose(g.views[eye].pose));
+  const M4 model = kind == kLayerTable ? table_model() : (kind == kLayerScorer ? scorer_model() : stadium_model());
+  // r43: single pass sends from the centre with the union field of view (plan_single_pass); the
+  // split stadium from the one eye it is drawn for this frame.
+  const int viewEye = stadiumHere ? slot.stadiumEye : (eye == 2 ? 0 : eye);
+  const bool centre = g.singlePass && !stadiumHere;
+  const M4 v = m4_mul(model, m4_view_from_pose(centre ? g.centrePose : g.views[viewEye].pose));
   std::memcpy(view, v.m, sizeof(v.m));
   // One projection for every layer of an eye, so their depths compare.
-  gx_projection(g.views[eye].fov, 0.05f, 1500.0f, proj);
-  *flags = kind == kLayerTable ? (kFlagSkipSky | kFlagTable) : kFlagSkipActors;
+  gx_projection(centre ? g.unionFov : g.views[viewEye].fov, 0.05f, 1500.0f, proj);
+  *flags = kind == kLayerTable ? (kFlagSkipSky | kFlagTable)
+                               : (kind == kLayerScorer ? (kFlagScorer | kFlagSkipSky) : kFlagSkipActors);
   return 1;
 }
 
 extern "C" void PortXrStereoEyeEnd(int eye) {
+  const int idx = eye == 2 ? 0 : eye;
+  if (eye == 2) {
+    // r43: the open pass closed in the GX stream, after its last draw. The drain then only waits for
+    // what the frame's end would wait for anyway, and lets the pool guard read what the sends used.
+    if (g.openTarget != 0) {
+      close_single_pass();
+      AuroraGXSync();
+    }
+    close_pool_measurement();
+    return;
+  }
   close_pool_measurement();
-  if (eye < 0 || eye > 1 || !g.eyePassOpen[eye]) {
+  if (eye < 0 || eye > 1 || !g.eyePassOpen[idx]) {
     return;
   }
   // Closes the eye's pass; its output is the shared image itself, so nothing is snapshotted.
@@ -2515,7 +3412,7 @@ extern "C" void PortXrStereoEyeEnd(int eye) {
   aurora::gfx::resolve_pass(desc, out);
   aurora_gx_set_xr_coverage(false);  // resolve_pass drained the FIFO
   aurora::gfx::set_offscreen_uses_native_logical_size(false);
-  g.eyePassOpen[eye] = false;
+  g.eyePassOpen[idx] = false;
 }
 
 extern "C" void PortXrStereoFrameEnd(void) {
@@ -2597,11 +3494,147 @@ static void ensure_fx() {
 
 extern "C" void PortXrSetGameplayLive(int live) { g.gameplayLive = live != 0; }
 
+// --- r42: the life-size scorer's show, its banner, and the crowd volume panel ---
+
+const char* scorer_name(int cls) {
+  static const char* kNames[] = {"BIRDO", "DAISY", "DONKEY KONG", "HAMMER BRO", "KOOPA", "LUIGI", "MARIO",
+                                 "PEACH", "TOAD", "WALUIGI", "WARIO", "YOSHI", "SUPER TEAM"};
+  return cls >= 0 && cls < 13 ? kNames[cls] : "STRIKER";
+}
+
+// The banner in the scoring team's colours (by captain).
+uint32_t team_colour(int captainClass) {
+  switch (captainClass) {
+    case 1: return 0xF08A1C;   // Daisy
+    case 2: return 0x8B4A1C;   // Donkey Kong
+    case 5: return 0x23A046;   // Luigi
+    case 6: return 0xD8231E;   // Mario
+    case 7: return 0xE8609E;   // Peach
+    case 9: return 0x5B2C91;   // Waluigi
+    case 10: return 0xB89A00;  // Wario
+    case 11: return 0x4EA82A;  // Yoshi
+    default: return 0x2E4A7A;  // Super Team / unknown
+  }
+}
+
+extern "C" void PortXrScorerFrame(int phase, float phaseTime, float height, int characterClass, int side,
+                                  int captainClass) {
+  if (!g.active) {
+    return;
+  }
+  auto& sc = g.scorer;
+  if (phase == 0) {
+    sc.phase = 0;
+    sc.prevPhase = 0;
+    sc.planned = false;
+    sc.logged = false;
+    return;
+  }
+  sc.reportNs = now_ns();
+  if (sc.prevPhase == 0) {
+    // A new show: its path from where you are now, and its banner drawn off this thread.
+    sc.height = height;
+    sc.cls = characterClass;
+    sc.side = side;
+    sc.captainClass = captainClass;
+    plan_scorer();
+    if (!g.bannerBusy) {
+      g.bannerBusy = true;
+      g_bannerReady = false;
+      g.banner.hasImage = false;
+      const std::string name = scorer_name(characterClass);
+      const uint32_t colour = team_colour(captainClass);
+      const int goals = sc.statGoals, assists = sc.statAssists;
+      const bool hatTrick = sc.statHatTrick;
+      std::thread([name, colour, goals, assists, hatTrick]() {
+        std::vector<uint8_t> pixels(static_cast<size_t>(kBannerW) * kBannerH * 4);
+        xrtext::goal_banner(pixels.data(), kBannerW, kBannerH, name.c_str(), colour, goals, assists, hatTrick);
+        g_bannerPixels.swap(pixels);
+        g_bannerReady = true;
+      }).detach();
+    }
+    XLOG("scorer: %s (class %d, %.2f units tall -> x%.2f), side %d", scorer_name(characterClass), characterClass,
+         height, PORT_SCORER_HEIGHT / std::max(0.2f, height), side);
+  }
+  if (phase == 3 && sc.prevPhase != 3) {
+    sc.leaveFrom = sc.prevPhase == 0 ? sc.spot : sc.lastPos;
+  }
+  // r43d: a hat trick throws the hats as the scorer arrives.
+  if (phase == 2 && sc.prevPhase == 1 && sc.statHatTrick) {
+    ensure_fx();
+    if (g.fxReady) xrfx::hat_trick(sc.spot.x, sc.spot.y, sc.spot.z, g.mrMode);
+  }
+  sc.phase = phase;
+  sc.phaseTime = phaseTime;
+  sc.prevPhase = phase;
+}
+
+extern "C" void PortXrScorerStats(int goals, int assists, int hatTrick) {
+  g.scorer.statGoals = goals;
+  g.scorer.statAssists = assists;
+  g.scorer.statHatTrick = hatTrick != 0;
+}
+
+extern "C" void PortXrSetPaused(int paused) {
+  const bool p = paused != 0;
+  if (p && !g.paused) g.sliderPlaced = false;  // placed in front of you when the pause opens
+  g.paused = p;
+}
+
+std::string crowd_path() {
+  const char* home = std::getenv("STRIKERS_HOME");
+  return std::string(home != nullptr && *home != '\0' ? home : "/storage/emulated/0/Strikers") + "/xr_crowd.txt";
+}
+
+void load_crowd_level() {
+  if (FILE* f = std::fopen(crowd_path().c_str(), "r")) {
+    int level = 6;
+    if (std::fscanf(f, "%d", &level) == 1) g.crowdLevel = std::max(0, std::min(10, level));
+    std::fclose(f);
+  }
+}
+
+void save_crowd_level() {
+  if (FILE* f = std::fopen(crowd_path().c_str(), "w")) {
+    std::fprintf(f, "%d\n", g.crowdLevel);
+    std::fclose(f);
+  }
+}
+
+// The crowd's loudness and place for the mixer: your level (6 = the game's own), and in the stadium
+// where your head points (the crowd's voices sit round the stands).
+void update_crowd_mix() {
+  float fx = 0.0f, fz = -1.0f;
+  if (g.headValid) floor_forward(g.headPose, &fx, &fz);
+  PortAudioSetCrowdUser(static_cast<float>(g.crowdLevel) / 6.0f, g.mrMode ? 0 : 1, std::atan2(fx, -fz));
+}
+
+// While paused: the right stick left/right steps the crowd volume (held: every quarter second).
+void crowd_slider_input(float stickX) {
+  if (!g.paused) return;
+  const uint64_t t = now_ns();
+  if (std::fabs(stickX) < 0.6f) {
+    g.crowdRepeatNs = 0;
+    return;
+  }
+  if (g.crowdRepeatNs != 0 && t < g.crowdRepeatNs) return;
+  g.crowdRepeatNs = t + (g.crowdRepeatNs == 0 ? 400000000ull : 220000000ull);
+  const int level = std::max(0, std::min(10, g.crowdLevel + (stickX > 0.0f ? 1 : -1)));
+  if (level == g.crowdLevel) return;
+  g.crowdLevel = level;
+  g.slider.hasImage = false;  // redrawn at the next frame
+  g.sliderShownUntilNs = t + 2000000000ull;
+  save_crowd_level();
+  XLOG("crowd volume %d/10", g.crowdLevel);
+}
+
 // The game's full-screen flashes (the white flash in its replay wipes, the Super Strike photo
 // flash) light up your whole view instead of only the game picture (Lance, 2026-10-10). Bright ones
 // only: the black fades and the long dark tints stay on the game picture.
 extern "C" int PortXrScreenFlash(float r, float gr, float b, float a) {
-  if (!g.active || std::max(r, std::max(gr, b)) < 0.5f) {
+  // r42: not while the life-size scorer is out: over your whole view it washed the scorer out
+  // (Lance: "they looked a bit transparent"); the flash stays on the game's own picture then.
+  if (!g.active || std::max(r, std::max(gr, b)) < 0.5f || scorer_shown()) {
     return 0;
   }
   ensure_fx();
@@ -2764,7 +3797,7 @@ extern "C" int PortXrBeginFrame(void) {
   const XrTime predicted = g.frameState.predictedDisplayTime != 0
                                ? g.frameState.predictedDisplayTime + g.frameState.predictedDisplayPeriod
                                : 0;
-  if (!stereo_mode()) {
+  if (!eye_mode()) {  // r42: or the life-size scorer, in any mode
     g.hasProjection = false;
   } else if (predicted != 0 && create_stereo_resources()) {
     XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO};
@@ -2909,14 +3942,29 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
   // Even without an XR frame to end, this game frame's eye images go back from Dawn (finish).
   if (ranGameFrame) {
     const uint64_t t0 = now_ns();
-    aurora::gfx::synchronize();
-    upload_latest_frame();
-    if (g.stereoThisFrame) {
-      g.stereoThisFrame = false;
-      finish_stereo_frame();
+    if (g.singlePass) {
+      // r43: no wait for the render worker. This frame's eyes go out once it has submitted them
+      // (finish_released_slots below, this or a following display frame), and the screen shows the
+      // newest frame read back by then; the next game frame meanwhile runs alongside.
+      upload_latest_frame();
+      if (g.stereoThisFrame) {
+        g.stereoThisFrame = false;
+        g.slot = (g.slot + 1) % kStereoSlots;
+      }
+    } else {
+      aurora::gfx::synchronize();
+      upload_latest_frame();
+      if (g.stereoThisFrame) {
+        g.stereoThisFrame = false;
+        finish_stereo_frame(g.slot);
+        g.slot = (g.slot + 1) % kStereoSlots;
+      }
     }
     g.stereoNsSinceStats += now_ns() - t0;
     ++g.gameFramesSinceStats;
+  }
+  if (g.singlePass) {
+    finish_released_slots();
   }
   if (!frameOk) {
     return;
@@ -2924,9 +3972,12 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
 
   XrCompositionLayerPassthroughFB ptLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
   XrCompositionLayerProjection projLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+  XrCompositionLayerProjection stadiumLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};  // r43 split
   XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   XrCompositionLayerProjection fxLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-  const XrCompositionLayerBaseHeader* layers[4];
+  XrCompositionLayerQuad bannerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};  // r42
+  XrCompositionLayerQuad sliderQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};  // r42
+  const XrCompositionLayerBaseHeader* layers[8];
   uint32_t layerCount = 0;
 
   // The celebration effects step every display frame, smooth whatever the game's frame rate, with
@@ -2962,6 +4013,12 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
     scene.charScale = PortXrCharacterScale();
     scene.stadiumScale = stadium_scale();
     scene.stadiumOrigin = XrVector3f{0.0f, g.floorY, kStandY * stadium_scale()};
+    // r42: the confetti lands on the life-size scorer, not through it.
+    scene.scorerValid = scorer_shown() && g.scorer.planned;
+    scene.scorerStill = g.scorer.phase == 2;
+    scene.scorerFeet = g.scorer.lastPos;
+    scene.scorerRadius = 0.3f;
+    scene.scorerHeight = PORT_SCORER_HEIGHT;
   }
 
   if (g.frameState.shouldRender) {
@@ -2973,10 +4030,21 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
     }
     // The 3D picture. On display frames without a new game frame the last pair is submitted again
     // with the poses it was drawn for, and the compositor reprojects it.
-    if (stereo_mode() && g.hasProjection) {
+    // r43 split stadium: the life-size stadium under the table, each eye as last drawn (the eyes take
+    // turns), opaque.
+    const bool splitMode = g.singlePass && g.stadiumSplit && g.tabletop && !g.mrMode && stereo_mode();
+    if (splitMode && g.stadiumValid[0] && g.stadiumValid[1]) {
+      stadiumLayer.layerFlags = 0;
+      stadiumLayer.space = g.local;
+      stadiumLayer.viewCount = 2;
+      stadiumLayer.views = g.stadiumViews;
+      layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stadiumLayer);
+    }
+    if (stereo_mode() && g.hasProjection) {  // (r42: the scorer alone goes after the screen, below)
       // Over passthrough only what was drawn is solid: the eye passes clear to alpha 0 and force
-      // alpha 255 on everything they draw (glPlat.cpp).
-      projLayer.layerFlags = g.mrMode ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
+      // alpha 255 on everything they draw (glPlat.cpp). r43: the same over the split stadium.
+      projLayer.layerFlags =
+          (g.mrMode || (splitMode && g.mainIsOverlay)) ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
       projLayer.space = g.local;
       projLayer.viewCount = 2;
       projLayer.views = g.projViews;
@@ -3093,17 +4161,79 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
           quad.size.height = width * aspect;
         }
       } else {
-        const ScreenPreset& preset = kScreenPresets[g.screenPreset];
-        quad.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-        quad.pose.position = {0.0f, -0.1f, -preset.distance};
-        quad.size.width = preset.width;
-        quad.size.height = preset.width * aspect;
+        place_free_screen(quad, aspect);  // r42: wherever you put it
+      }
+      {
+        // r43c: while the scorer is out, the screen rises to hang above its head and banner, and
+        // comes back down after (eased over about half a second).
+        const float target = scorer_shown() && g.scorer.planned
+                                 ? screen_lift_over_scorer(quad.pose.position, quad.size.width, quad.size.height)
+                                 : 0.0f;
+        const float dt = scene.dt > 0.0f ? std::min(scene.dt, 0.1f) : 1.0f / 72.0f;
+        g.screenLift += (target - g.screenLift) * std::min(1.0f, dt * 5.0f);
+        if (g.screenLift < 0.005f && target == 0.0f) g.screenLift = 0.0f;
+        quad.pose.position.y += g.screenLift;
       }
       layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
       scene.screenValid = true;
       scene.screenPose = quad.pose;
       scene.screenWidth = quad.size.width;
       scene.screenHeight = quad.size.height;
+    }
+    // r42: in the big screen room mode the eye picture holds only the life-size scorer, who stands
+    // in front of the screen: over it.
+    if (!stereo_mode() && scorer_shown() && g.hasProjection) {
+      projLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+      projLayer.space = g.local;
+      projLayer.viewCount = 2;
+      projLayer.views = g.projViews;
+      layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projLayer);
+    }
+    // r42: the goal banner over the scorer, from when it arrives until it turns to run back.
+    if (g_bannerReady.load()) {
+      panel_upload(g.banner, g_bannerPixels.data(), kBannerW, kBannerH);
+      g_bannerReady = false;
+      g.bannerBusy = false;
+    }
+    if (scorer_shown() && g.banner.hasImage && (g.scorer.phase == 2 || g.scorer.phase == 3)) {
+      const float t = g.scorer.phaseTime;
+      // It pops up as the scorer arrives and is gone a quarter second into the run back.
+      float pop = 1.0f;
+      if (g.scorer.phase == 2) {
+        pop = t < 0.22f ? 1.1f * t / 0.22f : (t < 0.38f ? 1.1f - 0.1f * (t - 0.22f) / 0.16f : 1.0f);
+      } else {
+        pop = std::max(0.0f, 1.0f - t / 0.25f);
+      }
+      if (pop > 0.01f) {
+        // r43b: the scorer stops out in front now (up to 8 m); the banner keeps its size to the eye.
+        const float sdx = g.scorer.spot.x - g.headPose.position.x, sdz = g.scorer.spot.z - g.headPose.position.z;
+        const float width = 1.1f * pop * std::max(1.0f, std::sqrt(sdx * sdx + sdz * sdz) / 2.5f);
+        const float height = width * static_cast<float>(kBannerH) / static_cast<float>(kBannerW);
+        const XrVector3f at{g.scorer.spot.x, g.scorer.spot.y + PORT_SCORER_HEIGHT + 0.18f + 0.5f * height,
+                            g.scorer.spot.z};
+        place_panel(bannerQuad, g.banner, at, width);
+        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&bannerQuad);
+      }
+    }
+    // r42: the crowd volume while paused (and two seconds after a change), in front of you.
+    const uint64_t nowNs = now_ns();
+    if (g.paused || nowNs < g.sliderShownUntilNs) {
+      if (!g.slider.hasImage) {
+        std::vector<uint8_t> pixels(static_cast<size_t>(kSliderW) * kSliderH * 4);
+        xrtext::crowd_slider(pixels.data(), kSliderW, kSliderH, g.crowdLevel, 10);
+        panel_upload(g.slider, pixels.data(), kSliderW, kSliderH);
+      }
+      if (!g.sliderPlaced && g.headValid) {
+        float fx = 0.0f, fz = -1.0f;
+        floor_forward(g.headPose, &fx, &fz);
+        g.sliderPose.position = {g.headPose.position.x + fx * 1.0f, g.headPose.position.y - 0.38f,
+                                 g.headPose.position.z + fz * 1.0f};
+        g.sliderPlaced = true;
+      }
+      if (g.slider.hasImage && g.sliderPlaced) {
+        place_panel(sliderQuad, g.slider, g.sliderPose.position, 0.5f);
+        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&sliderQuad);
+      }
     }
     // The celebration over everything else.
     const uint64_t fxStart = now_ns();
@@ -3135,6 +4265,7 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
 
 extern "C" void PortXrShutdown(void) {
   aurora_xr_set_frame_callback(nullptr, nullptr);
+  aurora_xr_set_submit_callback(nullptr, nullptr);
   aurora_xr_set_surface_suppressed(false);
   xrfx::shutdown();
   if (g.device != VK_NULL_HANDLE) {
@@ -3157,6 +4288,7 @@ extern "C" void PortXrShutdown(void) {
     if (g.eyeSwapchain[eye] != XR_NULL_HANDLE) xrDestroySwapchain(g.eyeSwapchain[eye]);
   }
   if (g.stage != XR_NULL_HANDLE) xrDestroySpace(g.stage);
+  if (g.view != XR_NULL_HANDLE) xrDestroySpace(g.view);
   if (g.actions.gripSpaceL != XR_NULL_HANDLE) xrDestroySpace(g.actions.gripSpaceL);
   if (g.actions.gripSpaceR != XR_NULL_HANDLE) xrDestroySpace(g.actions.gripSpaceR);
   if (g.device != VK_NULL_HANDLE) {
@@ -3189,6 +4321,7 @@ extern "C" int PortXrActive(void) { return 0; }
 extern "C" int PortXrStereoWorld(void) { return 0; }
 extern "C" int PortXrStereoFullStands(void) { return 0; }
 extern "C" int PortXrStereoFrameBegin(void) { return 0; }
+extern "C" int PortXrStereoSinglePass(void) { return 0; }
 extern "C" int PortXrStereoEyeLayer(int, int, float*, float*, int*) { return 0; }
 extern "C" void PortXrStereoEyeEnd(int) {}
 extern "C" void PortXrStereoFrameEnd(void) {}
@@ -3204,6 +4337,9 @@ extern "C" int PortXrTakeTestWipe(void) { return 0; }
 extern "C" int PortXrTakeTestItem(void) { return 0; }
 extern "C" void PortXrSetStsMeter(int, float, float, float, float, float) {}
 extern "C" int PortXrTakeTestSts(void) { return 0; }
+extern "C" void PortXrScorerFrame(int, float, float, int, int, int) {}
+extern "C" void PortXrScorerStats(int, int, int) {}
+extern "C" void PortXrSetPaused(int) {}
 extern "C" void PortXrNoteItemUse(int, int, int) {}
 extern "C" void PortXrLog(const char*) {}
 extern "C" float PortXrCharacterScale(void) { return 1.0f; }

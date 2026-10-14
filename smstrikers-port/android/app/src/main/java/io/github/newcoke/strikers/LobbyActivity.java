@@ -1,6 +1,7 @@
 package io.github.newcoke.strikers;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInstaller;
@@ -13,6 +14,10 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -41,10 +46,20 @@ import java.util.List;
  * <p>r39b: this panel runs in the app's main process and the game in a process of its own
  * (":game", see StrikersActivity.onDestroy). The "all files access" switch is asked for from here,
  * before the game is started.
+ *
+ * <p>r43: the Version button, Classic (alpha 1.2's game) or Plus (with what was added after it), and
+ * why an online match didn't start (the friend on the other Version or another release).
  */
 public class LobbyActivity extends Activity {
 
     static final String EXTRA_ROOM = "room";
+    // strikers-quest r43: the Version the panel shows (StrikersHome.CLASSIC / PLUS), so a game already
+    // running on the other one can tell (StrikersActivity.onNewIntent).
+    static final String EXTRA_EDITION = "edition";
+    // strikers-quest r43: why the last online match didn't start, one line beside the game's log
+    // (src/platform/xr_net.cpp writes "edition=..." or "protocol=..."; StrikersActivity this one).
+    static final String ONLINE_NOTE = "online-note.txt";
+    static final String NOTE_VERSION_CHANGED = "version-changed";
     private static final String PREFS = "lobby";
     private static final String LAST_CODE = "lastCode";
     // strikers-quest r39b: the code Host showed last, so it shows the same one after a relaunch.
@@ -94,13 +109,16 @@ public class LobbyActivity extends Activity {
             page.addView(button("Update now", true, v -> startUpdate()));
         }
         showLastError();
-        note("Quest alpha. Online: both players pick Grudge Match in the same room.");
+        showOnlineNote();
+        note("Quest alpha. Online: both players pick Grudge Match in the same room, on the same Version.");
         page.addView(button("Play offline", true, v -> start("")));
         page.addView(button("Host an online match", false, v -> showHost(hostedCode())));
         page.addView(button("Join with a code", false, v -> showJoin()));
         page.addView(button("Choose game file", false, v -> showChooser(null, null)));
         TextView game = note(gameStatus());
         game.setTextSize(14);
+        // strikers-quest r43: Classic or Plus, by the app's own version below.
+        page.addView(button("Version: " + editionName(StrikersHome.edition(this)), false, v -> showVersions()));
         TextView version = note(versionText());
         version.setTextSize(12);
         version.setTextColor(MUTED);
@@ -197,6 +215,131 @@ public class LobbyActivity extends Activity {
             f.delete();
             showHome();
         }));
+    }
+
+    /**
+     * strikers-quest r43: why the last online match didn't start, in words, with an OK that clears it.
+     * The game comes back here when it refuses one (StrikersActivity), so this is what the player sees
+     * first, with the Version button on the same page. Before r43 the reason was only in the log.
+     */
+    private void showOnlineNote() {
+        final File f = new File(StrikersHome.homeDir(this), ONLINE_NOTE);
+        if (!f.isFile()) return;
+        String why = readText(f, 200);
+        String mine = StrikersHome.edition(this);
+        String text;
+        if (why.startsWith("edition=")) {
+            String theirs = StrikersHome.CLASSIC.equals(why.substring(8).trim()) ? StrikersHome.CLASSIC
+                    : StrikersHome.PLUS;
+            if (theirs.equals(mine)) {  // already switched to theirs
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                return;
+            }
+            text = "Your friend is playing " + editionName(theirs) + ". You are on " + editionName(mine)
+                    + ".\nOne of you: switch Version to match, then start the match again.";
+        } else if (why.startsWith(NOTE_VERSION_CHANGED)) {
+            text = "The game was still open on the other Version, so it closed. Press the same button"
+                    + " again to play " + editionName(mine) + ".";
+        } else {
+            text = "Your friend has a different release of Quest 3 Strikers, so you can't play online"
+                    + " together. Both of you need the same one (Update now, or the GitHub page).";
+        }
+        TextView t = note(text);
+        t.setTextColor(WARN);
+        page.addView(button("OK", false, v -> {
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+            showHome();
+        }));
+    }
+
+    /** strikers-quest r43: one line for {@link #showOnlineNote} (StrikersActivity, in the game's process). */
+    static void writeOnlineNote(android.content.Context context, String line) {
+        try (java.io.OutputStream out = new java.io.FileOutputStream(
+                new File(StrikersHome.homeDir(context), ONLINE_NOTE))) {
+            out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            // Only the explanation is lost; the panel still opens.
+        }
+    }
+
+    /** strikers-quest r43: "Classic 1.2" / "Plus 1.3". */
+    private String editionName(String edition) {
+        return StrikersHome.CLASSIC.equals(edition) ? "Classic 1.2" : plusName();
+    }
+
+    /**
+     * strikers-quest r43: Plus is this release, numbered the way the releases are (alpha 1.2 was
+     * versionName 0.1.2): "0.1.3-dev (r43)" is Plus 1.3.
+     */
+    private String plusName() {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^\\d+\\.(\\d+)\\.(\\d+)").matcher(versionName());
+        return "Plus " + (m.find() ? m.group(1) + "." + m.group(2) : "1.3");
+    }
+
+    /**
+     * strikers-quest r43: the Version picker (Lance: "we draw a line after 1.2 to notify versions after
+     * that are no longer strikers as they know it"). A tap saves it at once; the game takes it when it
+     * starts (StrikersHome.prepare -> STRIKERS_EDITION, src/platform/edition.cpp).
+     */
+    private void showVersions() {
+        page.removeAllViews();
+        onHome = false;
+        title("Choose your version", 24);
+        note("To play online, you and your friend need the same one.");
+        final String current = StrikersHome.edition(this);
+        page.addView(versionRow(StrikersHome.CLASSIC, "Mario Strikers as you know it", current));
+        // The line: everything under it adds to the game.
+        TextView label = note("Below this line: not Strikers as you know it");
+        label.setTextColor(ACCENT);
+        label.setTextSize(15);
+        label.setPadding(0, dp(18), 0, dp(6));
+        View line = new View(this);
+        line.setBackgroundColor(ACCENT);
+        page.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+        page.addView(versionRow(StrikersHome.PLUS, "New: life-size goal scorer, GOAL SCORED BY banner,"
+                + " longer goal replay, living crowd", current));
+        page.addView(button("Back", false, v -> showHome()));
+    }
+
+    /** strikers-quest r43: one Version in the picker, its name large over what it is. */
+    private Button versionRow(String edition, String about, String current) {
+        String name = editionName(edition) + (edition.equals(current) ? "   (chosen)" : "");
+        Button b = row(name + "\n" + about, true, v -> {
+            if (!edition.equals(StrikersHome.edition(this))) {
+                StrikersHome.chooseEdition(this, edition);
+                endRunningGame();
+                // A note that said to switch has been acted on.
+                //noinspection ResultOfMethodCallIgnored
+                new File(StrikersHome.homeDir(this), ONLINE_NOTE).delete();
+            }
+            showHome();
+        });
+        SpannableString text = new SpannableString(b.getText());
+        text.setSpan(new RelativeSizeSpan(1.35f), 0, name.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        text.setSpan(new StyleSpan(Typeface.BOLD), 0, name.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        b.setText(text);
+        return b;
+    }
+
+    /**
+     * strikers-quest r43: a game left running in the background (the Quest button, then this app
+     * again) keeps the Version it started with, and a start from here would only hand it a room
+     * (StrikersActivity.onNewIntent). So a Version change ends it: the next start is a fresh game.
+     * It is paused behind this panel, as when the system ends a background app for memory.
+     */
+    private void endRunningGame() {
+        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        List<ActivityManager.RunningAppProcessInfo> running = am != null ? am.getRunningAppProcesses() : null;
+        if (running == null) return;
+        String game = getPackageName() + ":game";
+        for (ActivityManager.RunningAppProcessInfo p : running) {
+            if (game.equals(p.processName)) {
+                android.util.Log.i("strikers", "Version changed: ending the game left running (pid " + p.pid + ")");
+                android.os.Process.killProcess(p.pid);
+            }
+        }
     }
 
     /** strikers-quest r41: which game file a match would start with, for the home page. */
@@ -362,6 +505,7 @@ public class LobbyActivity extends Activity {
         }
         Intent game = new Intent(this, StrikersActivity.class);
         game.putExtra(EXTRA_ROOM, code);
+        game.putExtra(EXTRA_EDITION, StrikersHome.edition(this));  // strikers-quest r43
         startActivity(game);
         finish();
     }
@@ -466,7 +610,9 @@ public class LobbyActivity extends Activity {
         b.setPadding(p, p, p, p);
         b.setEnabled(onClick != null);
         b.setOnClickListener(onClick);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(620), ViewGroup.LayoutParams.WRAP_CONTENT);
+        // r43b: the panel's width, wrapping (Lance: the Version rows ran past the panel at 620 dp).
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(8);
         b.setLayoutParams(lp);
         return b;

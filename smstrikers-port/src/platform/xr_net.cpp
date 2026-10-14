@@ -7,6 +7,7 @@
 // skips them. A network thread owns the connection; the game thread queues what to send and takes
 // what arrived once a headset frame (poll), so the lockstep never waits on the network in a frame.
 #include "../../include/port/xr_net.h"
+#include "../../include/port/edition.h"  // strikers-quest r43: Classic / Plus, in the hello
 #include "xr_net.hpp"
 
 extern "C" void PortNetSetFixedStep(int on);  // src/platform/vi.c
@@ -62,7 +63,10 @@ static void net_file_log(const char* fmt, ...) {
 // brokers, and the brokers dropped messages (the first online night froze).
 constexpr const char* kServerHost = "strikers-rooms.strikers-rooms.workers.dev";
 constexpr int kServerPort = 443;
-constexpr uint8_t kProtocol = 2;  // r39: room server + room codes + resend fix (r38 headsets: 1)
+// r39: room server + room codes + resend fix (r38 headsets: 1). r42: 3, the held goal replay (the
+// post-goal show) changes the game's frames, so an r41 and an r42 headset would drift apart.
+// strikers-quest r43: 4, the hello and the start carry the Version (Classic / Plus, edition.h).
+constexpr uint8_t kProtocol = 4;
 
 uint64_t now_ms() {
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -80,6 +84,30 @@ std::string sanitize_room(const char* s) {
     else if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) r.push_back(c);
   }
   return r.size() >= 3 ? r : std::string();
+}
+
+// strikers-quest r43: this headset's Version on the wire, 0 Classic / 1 Plus (edition.h). Two headsets
+// on different ones run different games (Plus holds the goal replay; its crowd plays samples of its
+// own), so they never play each other.
+uint8_t local_edition() { return PortPlusFeatures() ? 1 : 0; }
+const char* edition_name(uint8_t edition) { return edition != 0 ? "Plus" : "Classic"; }
+
+// strikers-quest r43: why an online match did not start, for the player. Before r43 that was only in
+// the log, and the player saw a CPU opponent. online-note.txt beside the log (STRIKERS_HOME) holds one
+// line, "edition=classic|plus" (the friend's Version) or "protocol=N" (the friend's build), which the
+// launcher panel puts into words (LobbyActivity.showOnlineNote); StrikersActivity polls the flag
+// (nativeTakeOnlineNote) and goes back to that panel, where the Version button is.
+std::atomic<bool> g_notePending{false};
+
+void online_note(const char* line) {
+  const char* home = std::getenv("STRIKERS_HOME");
+  const std::string path =
+      std::string(home != nullptr && *home != '\0' ? home : "/storage/emulated/0/Strikers") + "/online-note.txt";
+  if (FILE* f = std::fopen(path.c_str(), "w")) {
+    std::fprintf(f, "%s\n", line);
+    std::fclose(f);
+  }
+  g_notePending = true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -360,6 +388,12 @@ struct State {
   uint64_t otherBuildMs = 0;
   uint8_t otherBuildProtocol = 0;
   bool otherBuildLogged = false;
+  // strikers-quest r43: a headset in the room on the other Version: its id (nothing it sends is
+  // taken), when its hello last came, and its Version; the match start says so like the above.
+  uint64_t otherEditionId = 0;
+  uint64_t otherEditionMs = 0;
+  uint8_t otherEdition = 0;
+  bool otherEditionLogged = false;
   // This headset at the match start (the loading screen).
   bool localReady = false;
   uint64_t readySinceMs = 0, lastHoldMs = 0;
@@ -425,6 +459,7 @@ void send_hello() {
   Writer w = header(kHello);
   const bool ready = st.localReady && !st.online && !st.startPending;
   w.u8(ready ? 1 : 0);
+  w.u8(local_edition());  // r43
   write_choice(w, st.localChoice);
   send(std::move(w.v));
   st.lastHelloMs = now_ms();
@@ -509,6 +544,7 @@ void host_start() {
   w.u64(st.peerId);
   w.u32(st.seed);
   w.u8(static_cast<uint8_t>(st.delay));
+  w.u8(local_edition());  // r43: the guest checks it too
   write_choice(w, st.localChoice);
   write_choice(w, st.peerChoice);
   st.startMsg = w.v;
@@ -548,6 +584,30 @@ void handle(const std::vector<uint8_t>& msg) {
     st.otherBuildProtocol = proto;
     return;
   }
+  // strikers-quest r43: a headset on the other Version is never the friend, on either side, so
+  // neither hosts a match with it. Its hello says which ([ready][edition] first); nothing else it
+  // sends is taken. (A Version is fixed for a game's run, and a new run is a new sender id.)
+  if (type == kHello) {
+    Reader peek = r;
+    peek.u8();  // ready
+    const uint8_t edition = peek.u8();
+    if (peek.ok && edition != local_edition()) {
+      if (st.otherEditionId != sender) {
+        NLOG("net: someone in the room plays %s, this headset %s; the two cannot play each other",
+             edition_name(edition), edition_name(local_edition()));
+      }
+      st.otherEditionId = sender;
+      st.otherEditionMs = now;
+      st.otherEdition = edition;
+      if (st.peerId == sender) {  // taken for the friend from a message before its hello
+        st.peerId = 0;
+        st.peerReady = false;
+        st.peerLeftHoldMs = 0;
+      }
+      return;
+    }
+  }
+  if (st.otherEditionId != 0 && sender == st.otherEditionId) return;
   // The friend: whoever else is here; a newcomer replaces one gone quiet.
   if (st.peerId != sender) {
     if (peer_present()) return;  // a third headset: ignored
@@ -562,6 +622,7 @@ void handle(const std::vector<uint8_t>& msg) {
   switch (type) {
   case kHello: {
     const bool ready = r.u8() != 0;
+    r.u8();  // r43: the Version, the same as this headset's (checked above)
     const Choice c = read_choice(r);
     if (!r.ok) return;
     if (ready && !st.peerReady) NLOG("net: friend started a Friendly, waiting at the loading screen");
@@ -608,9 +669,12 @@ void handle(const std::vector<uint8_t>& msg) {
     const uint64_t guest = r.u64();
     const uint32_t seed = r.u32();
     const int delay = r.u8();
+    const uint8_t edition = r.u8();
     const Choice home = read_choice(r);
     const Choice away = read_choice(r);
     if (!r.ok || guest != st.myId || host != sender) return;
+    // r43: never a match on the other Version (the hellos keep the two apart already).
+    if (edition != local_edition()) return;
     if (st.online || st.startPending || !st.localReady) return;  // already going, or not at the start
     st.isHost = false;
     st.seed = seed;
@@ -709,6 +773,7 @@ void poll() {
     st.peerLeftHoldMs = 0;
     st.localReady = false;
     st.gaveUp = false;
+    st.otherEditionMs = 0;  // r43: the old room's
     // r39b: and anything still queued from or for the old room; the connection follows from here
     // (net_thread drops what the old link still brings in after this).
     std::lock_guard<std::mutex> lock(sh.m);
@@ -859,6 +924,7 @@ extern "C" int PortNetHoldMatchStart(const PortNetMatch* localChoice, int localS
   if (now - st.lastHoldMs > 2000) {  // a new match start
     st.gaveUp = false;
     st.otherBuildLogged = false;
+    st.otherEditionLogged = false;
   }
   st.lastHoldMs = now;
   if (st.online) return 0;
@@ -875,6 +941,16 @@ extern "C" int PortNetHoldMatchStart(const PortNetMatch* localChoice, int localS
       NLOG("net: this match is offline: the other headset in the room runs another version of the game "
            "(online protocol %u there, %u here), both need the same one",
            static_cast<unsigned>(st.otherBuildProtocol), static_cast<unsigned>(xrnet::kProtocol));
+      // strikers-quest r43: and the player is told (the launcher panel, which the game goes back to).
+      char line[32];
+      std::snprintf(line, sizeof(line), "protocol=%u", static_cast<unsigned>(st.otherBuildProtocol));
+      xrnet::online_note(line);
+    } else if (st.otherEditionMs != 0 && now - st.otherEditionMs < 5000 && !st.otherEditionLogged) {
+      // strikers-quest r43: the other headset is on the other Version (Classic / Plus).
+      st.otherEditionLogged = true;
+      NLOG("net: this match is offline: the other headset in the room plays %s, this one %s; both need the "
+           "same Version", xrnet::edition_name(st.otherEdition), xrnet::edition_name(xrnet::local_edition()));
+      xrnet::online_note(st.otherEdition != 0 ? "edition=plus" : "edition=classic");
     }
     return 0;
   }
@@ -973,6 +1049,14 @@ extern "C" JNIEXPORT void JNICALL Java_io_github_newcoke_strikers_StrikersActivi
   std::lock_guard<std::mutex> lock(xrnet::sh.m);
   xrnet::sh.room = room;
   xrnet::sh.roomSet = true;
+}
+
+// strikers-quest r43: StrikersActivity, once a second: true once after an online match was refused
+// (online_note: the friend is on the other Version or another build), so the game goes back to the
+// launcher panel, which says why and has the Version button.
+extern "C" JNIEXPORT jboolean JNICALL Java_io_github_newcoke_strikers_StrikersActivity_nativeTakeOnlineNote(JNIEnv*,
+                                                                                                         jclass) {
+  return xrnet::g_notePending.exchange(false) ? JNI_TRUE : JNI_FALSE;
 }
 
 #else  // !__ANDROID__ || !STRIKERS_XR

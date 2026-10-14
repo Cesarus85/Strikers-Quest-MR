@@ -47,6 +47,13 @@ struct Scene {
   // The life-size stadium: same mapping with this scale and origin.
   float stadiumScale = 1.0f;
   XrVector3f stadiumOrigin{0.0f, 0.0f, 0.0f};
+  // r42: the life-size goal scorer, a solid the pieces fall onto: an upright cylinder from its feet
+  // (LOCAL), radius and height in meters. Pieces bounce off its sides and, while it stands
+  // (scorerStill), come to rest on its head and ride there until it runs.
+  bool scorerValid = false;
+  bool scorerStill = false;
+  XrVector3f scorerFeet{0.0f, 0.0f, 0.0f};
+  float scorerRadius = 0.28f, scorerHeight = 1.52f;
   // The screen quad, for occlusion.
   bool screenValid = false;
   XrPosef screenPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
@@ -71,6 +78,10 @@ float jumbotron_drop();
 
 // Cannon waves fired since the last goal (xr_quest.cpp buzzes the controllers on each new one).
 int cannon_waves_fired();
+
+// r43c: a hat trick. Caps are thrown in from all around and land on the floor around (x, y, z),
+// LOCAL (the scorer's spot); `room` = your room (fewer, from around you) rather than the stadium.
+void hat_trick(float x, float y, float z, bool room);
 
 // The Tabletop "that's you" marker: the controlled player's position in game units and his team's
 // captain (eCharacterClass) for the colour. Drawn only while scene.tabletop.

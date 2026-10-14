@@ -245,7 +245,8 @@ list(REMOVE_ITEM PLATFORM_SOURCES
 list(REMOVE_ITEM PLATFORM_SOURCES
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_quest.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_fx.cpp"
-     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp")
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_text.cpp")
 
 # src/platform/operator_new.cpp is the one file in the tree that is not C++11.
 list(REMOVE_ITEM PLATFORM_SOURCES
@@ -672,7 +673,8 @@ if(STRIKERS_AURORA)
     # compiles to stubs, so main.cpp links everywhere.
     add_library(strikers_xr OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_quest.cpp"
                                    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_fx.cpp"
-                                   "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp")
+                                   "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp"
+                                   "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_text.cpp")
     set_target_properties(strikers_xr PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
     # Aurora's full usage requirements (includes incl. Dawn's, and TARGET_PC and the rest) and
     # nothing of the port's: include/ here is NOT on the path, because include/dolphin/pad.h is the
