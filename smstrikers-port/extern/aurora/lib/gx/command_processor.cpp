@@ -1367,6 +1367,10 @@ void handle_aurora(Reader& reader) noexcept {
       aurora_gx_set_xr_coverage_mode(0);
       gfx::set_offscreen_uses_native_logical_size(false);
     }
+  } else if (subCmd == GX_AURORA_XR_COVERAGE) {
+    // strikers-quest r44e: the next layer's coverage inside the open eye pass (the life-size scorer
+    // over passthrough counts its blended, depth-writing surfaces as solid).
+    aurora_gx_set_xr_coverage_mode(reader.read<u8>());
   }
 
   else {

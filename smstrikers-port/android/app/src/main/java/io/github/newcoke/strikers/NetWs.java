@@ -169,8 +169,24 @@ final class NetWs {
     }
 
     /**
+     * strikers-quest r44: one text message (the quick-match queue's "ping", LobbyActivity). False when
+     * the connection is gone.
+     */
+    static boolean sendText(int id, String text) {
+        try {
+            final Conn c = CONNS.get(id);
+            if (c == null || c.closed || text == null) return false;
+            return sendFrame(c, 0x1, text.getBytes(StandardCharsets.UTF_8));
+        } catch (Throwable e) {
+            Log.w(TAG, "room server send failed: " + e);
+            return false;
+        }
+    }
+
+    /**
      * The next whole message into `buf`: its length (>= 0), -2 when none arrived within timeoutMs,
-     * -1 when the connection is gone and nothing is left.
+     * -1 when the connection is gone and nothing is left. r44: text messages come the same way, as
+     * their UTF-8 bytes.
      */
     static int recv(int id, byte[] buf, int timeoutMs) {
         try {

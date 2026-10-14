@@ -714,6 +714,8 @@ extern "C" void PortCelebrationPoll(void)
                 }
             }
         }
+        // strikers-quest r44e: the Tabletop screen shows the game's picture while a Super Strike runs.
+        PortXrSetSuperStrike((stsRunning || g_pGame->mbCaptainShotToScoreOn || sts.m_bMeterVisible) ? 1 : 0);
         if (g_pGame->mbCaptainShotToScoreOn && !stsRunning)
         {
             s_stsSeconds += kFrame;
@@ -844,9 +846,14 @@ extern "C" void PortNetGameFrameBegin(void)
     pInfo->SetSidekick(0, (eSidekickID)m.sidekicks[0]);
     pInfo->SetSidekick(1, (eSidekickID)m.sidekicks[1]);
     pInfo->SetStadium((eStadiumID)m.stadium);
+    // strikers-quest r44c: the test friend (tools/fakefriend) can ask for its side to be played by the
+    // computer: its pad then has no side, which is how a Friendly against the CPU is set up.
     for (int pad = 0; pad < 4; pad++)
-        pInfo->SetPlayingSide((unsigned short)pad, (short)(pad < 2 ? pad : -1));
-    pInfo->mMainUserPadNumber = (eFEINPUT_PAD)0;
+    {
+        const bool cpu = m.cpuPlays == pad + 1;
+        pInfo->SetPlayingSide((unsigned short)pad, (short)(pad < 2 && !cpu ? pad : -1));
+    }
+    pInfo->mMainUserPadNumber = (eFEINPUT_PAD)(m.cpuPlays == 1 ? 1 : 0);
     port_net_unpack_options(m.options, m.optionsSize);
 }
 

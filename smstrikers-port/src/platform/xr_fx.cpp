@@ -158,7 +158,6 @@ struct Particle {
   float gravity;      // sparks: share of gravity
   bool onScorer;      // r42: resting on the life-size scorer's head (rides along, falls when it runs)
   float restOff[2];   // r42: where on the head, from its feet (x, z)
-  bool ballistic;     // r43c: thrown (a hat): flies under gravity alone until it lands
 };
 
 enum class Stage { Idle, Raining, Tapering };
@@ -175,7 +174,7 @@ static_assert(sizeof(Instance) == 56, "instance layout");
 // Lance, 2026-10-10: "like we just won the Super Bowl with every goal".
 constexpr uint32_t kMaxParticles = 16000;
 constexpr uint32_t kSlots = 3;
-constexpr uint32_t kMaxOccluderVerts = 64;
+constexpr uint32_t kMaxOccluderVerts = 256;  // r44e: + the scorer and the banner
 
 struct Slot {
   VkBuffer instances = VK_NULL_HANDLE;
@@ -373,7 +372,7 @@ void add_paper(const Scene& sc, const Scale& k, const XrVector3f& p, const float
     q.c1 = pack(s.theme.paper[a]);
     q.c2 = pack(s.theme.paper[b]);
   }
-  q.life = sc.mr ? 6.0f : 3.5f;
+  q.life = sc.mr ? 0.7f : 0.6f;  // r44: once landed it fades out in this long (step_particles)
   q.flutterPhase = frand(0.0f, 6.28f);
   q.flutterFreq = frand(1.5f, 3.2f);
   s.parts.push_back(q);
@@ -396,7 +395,7 @@ void add_piece(const Scene& sc, const Scale& k, const XrVector3f& p, const float
   q.c1 = pack(star ? 0xFFD21F : s.theme.pieceMain);
   q.c2 = pack(star ? 0xFFF2A0 : s.theme.pieceDetail);
   q.kind = kKindPiece;
-  q.life = sc.mr ? 6.0f : 3.5f;
+  q.life = sc.mr ? 0.8f : 0.7f;  // r44: once landed it fades out in this long (step_particles)
   q.flutterPhase = frand(0.0f, 6.28f);
   q.flutterFreq = frand(0.8f, 1.6f);
   q.flutterAmp = k.flutter * 0.35f;
@@ -504,70 +503,80 @@ int launch_points(const Scene& sc, XrVector3f out[4], XrVector3f outward[4]) {
   return 4;
 }
 
+// Where the rain falls: a disc around you (around you and the table in Tabletop), from just under
+// the ceiling in your room, high over the pitch in the stadium.
+struct RainArea {
+  XrVector3f centre;
+  float top;
+};
+RainArea rain_area(const Scene& sc, const Scale& k) {
+  const XrVector3f head = head_of(sc);
+  RainArea r{head, sc.mr ? std::max(sc.floorY + 2.3f, head.y + 0.45f) : sc.floorY + k.rainHeight};
+  if (sc.tabletop && sc.mr) {
+    r.centre.x = 0.5f * (head.x + sc.tablePos.x);
+    r.centre.z = 0.5f * (head.z + sc.tablePos.z);
+  }
+  return r;
+}
+
+// strikers-quest r44, a wave (Lance: "it shouldnt just pile up in random ass piles it should just fall
+// from the sky if its confetti, same with the mushrooms and other items"): the cannons at the field's
+// corners are gone. Each wave is a burst of the same confetti and pieces let go from the sky, spread
+// over the whole rain disc and over a band of heights, so it falls as a cloud and nowhere in a heap.
 void fire_cannon_wave(const Scene& sc, const Scale& k) {
-  XrVector3f from[4], out[4];
-  const int n = launch_points(sc, from, out);
-  const int papers = static_cast<int>(k.cannonPapers * s.intensity);
-  const int pieces = static_cast<int>(k.cannonPieces * s.intensity);
-  for (int i = 0; i < n; ++i) {
-    for (int m = 0; m < papers + pieces; ++m) {
-      const float up = k.cannonSpeed * frand(0.75f, 1.15f);
-      const float outward = k.cannonSpeed * frand(0.05f, 0.4f);
-      const float spread = k.cannonSpeed * 0.2f;
-      const float v[3] = {out[i].x * outward + frand(-spread, spread), up, out[i].z * outward + frand(-spread, spread)};
-      if (m < papers) add_paper(sc, k, from[i], v, irand(100) < (sc.mr ? 15 : 7));
-      else add_piece(sc, k, from[i], v);
+  const RainArea area = rain_area(sc, k);
+  const int papers = static_cast<int>(k.cannonPapers * s.intensity) * 2;  // the old four corners' worth,
+  const int pieces = static_cast<int>(k.cannonPieces * s.intensity) * 2;  // halved: spread out it reads fuller
+  const float band = sc.mr ? 0.6f : 6.0f;
+  for (int m = 0; m < papers + pieces; ++m) {
+    const float a = frand(0.0f, 6.2831853f), r = k.rainRadius * 1.15f * std::sqrt(frand(0.0f, 1.0f));
+    const XrVector3f p{area.centre.x + std::cos(a) * r, area.top + frand(0.0f, band), area.centre.z + std::sin(a) * r};
+    if (m < papers) {
+      const float v[3] = {0.0f, -k.paperFall * frand(0.3f, 0.8f), 0.0f};
+      add_paper(sc, k, p, v, irand(100) < (sc.mr ? 15 : 7));
+    } else {
+      const float v[3] = {0.0f, -k.pieceFall * frand(0.3f, 0.8f), 0.0f};
+      add_piece(sc, k, p, v);
     }
   }
   ++s.cannonWave;
 }
 
 // r43d, the hat trick (Lance: "we get hats thrown on the field ... they can just land all over the
-// field"): one cap, thrown from the stands onto anywhere on the life-size pitch; in your room onto
-// the Tabletop field (small), or, with the big screen, onto the floor around the scorer. It stays
-// with the other pieces. Caps in the characters' colours with a white badge.
-void throw_hat(const Scene& sc) {
+// field"): caps in the characters' colours with a white badge. strikers-quest r44: they come down
+// from the sky like the rest (no more throws from the edges into one heap), anywhere on the
+// life-size pitch, on the Tabletop field (small), or, with the big screen, on the floor all around
+// the scorer, and fade soon after they land.
+void throw_hat(const Scene& sc, const Scale& k) {
   if (room_full()) return;
   static const uint32_t kCapColours[] = {0xE4202A, 0x1FA83A, 0xFFD21F, 0x6B2FB3, 0x2F6FE0};
-  const XrVector3f head = head_of(sc);
   const bool tableTop = sc.tabletop && sc.mr;
   const float size = tableTop ? 0.05f : (sc.mr ? 0.42f : 0.55f);
-  const float lift = rest_for(kCap).half * size;
-  XrVector3f target, from;
-  const float fa = frand(0.0f, 6.2831853f);
+  const RainArea area = rain_area(sc, k);
+  XrVector3f from;
   if (!sc.mr) {
-    // Anywhere on the pitch (game units, as the game lays it out), from over the stands all round.
-    target = game_to_room(sc.stadiumScale, 0.0f, sc.stadiumOrigin, frand(-20.0f, 20.0f), frand(-12.0f, 12.0f), 0.0f);
-    target.y = sc.floorY + lift;
-    const float fr = frand(38.0f, 52.0f);
-    from = game_to_room(sc.stadiumScale, 0.0f, sc.stadiumOrigin, std::cos(fa) * fr * 1.2f, std::sin(fa) * fr * 0.8f,
-                        8.0f);
+    // Anywhere over the pitch (game units, as the game lays it out).
+    from = game_to_room(sc.stadiumScale, 0.0f, sc.stadiumOrigin, frand(-20.0f, 20.0f), frand(-12.0f, 12.0f), 0.0f);
+    from.y = area.top + frand(0.0f, 8.0f);
   } else if (tableTop) {
-    // Onto the table's pitch, tossed in from just beyond its edges.
-    target = game_to_room(sc.tableScale, sc.tableYaw, sc.tablePos, frand(-20.0f, 20.0f), frand(-12.0f, 12.0f), 0.0f);
-    target.y = sc.tablePos.y + 0.002f + lift;
-    from = XrVector3f{sc.tablePos.x + std::cos(fa) * 0.9f, sc.tablePos.y + 0.35f, sc.tablePos.z + std::sin(fa) * 0.9f};
+    from = game_to_room(sc.tableScale, sc.tableYaw, sc.tablePos, frand(-20.0f, 20.0f), frand(-12.0f, 12.0f), 0.0f);
+    from.y = area.top + frand(0.0f, 0.3f);
   } else {
-    const float ta = frand(0.0f, 6.2831853f), tr = 1.2f * std::sqrt(frand(0.0f, 1.0f));
-    target = XrVector3f{s.hatCentre.x + std::cos(ta) * tr, sc.floorY + lift, s.hatCentre.z + std::sin(ta) * tr};
-    from = XrVector3f{head.x + std::cos(fa) * 2.2f, head.y + 0.4f, head.z + std::sin(fa) * 2.2f};
+    const float ta = frand(0.0f, 6.2831853f), tr = 2.6f * std::sqrt(frand(0.0f, 1.0f));
+    from = XrVector3f{s.hatCentre.x + std::cos(ta) * tr, area.top + frand(0.0f, 0.4f), s.hatCentre.z + std::sin(ta) * tr};
   }
-  const float g = sc.mr ? 1.6f : 9.8f;  // step_particles' gravity
-  const float T = tableTop ? frand(0.9f, 1.3f) : (sc.mr ? frand(1.3f, 1.9f) : frand(1.8f, 2.8f));
   Particle q{};
   q.p[0] = from.x;
   q.p[1] = from.y;
   q.p[2] = from.z;
-  q.v[0] = (target.x - from.x) / T;
-  q.v[1] = (target.y - from.y) / T + 0.5f * g * T;
-  q.v[2] = (target.z - from.z) / T;
+  q.v[1] = -k.pieceFall;
   random_quat(q.q);
-  q.axis[0] = frand(-0.2f, 0.2f);  // spun mostly flat, like a thrown cap
+  q.axis[0] = frand(-0.2f, 0.2f);  // spinning mostly flat, like a tossed cap
   q.axis[1] = 1.0f;
   q.axis[2] = frand(-0.2f, 0.2f);
   const float len = std::sqrt(q.axis[0] * q.axis[0] + 1.0f + q.axis[2] * q.axis[2]);
   for (float& a : q.axis) a /= len;
-  q.spin = frand(5.0f, 10.0f);
+  q.spin = frand(2.0f, 5.0f);
   q.size = size;
   q.aspect = 1.0f;
   q.shape = kCap;
@@ -577,8 +586,11 @@ void throw_hat(const Scene& sc) {
   q.c1 = pack(main);
   q.c2 = pack(0xFFFFFF);
   q.kind = kKindPiece;
-  q.ballistic = true;
-  q.life = 25.0f;
+  q.flutterPhase = frand(0.0f, 6.28f);
+  q.flutterFreq = frand(0.8f, 1.6f);
+  q.flutterAmp = k.flutter * 0.35f;
+  q.fallSpeed = k.pieceFall * (tableTop ? frand(0.8f, 1.0f) : frand(1.0f, 1.3f));
+  q.life = 1.6f;  // once landed (step_particles)
   s.parts.push_back(q);
 }
 
@@ -686,20 +698,16 @@ void step_particles(const Scene& sc, const Scale& k, float dt) {
         keep = false;
       }
     } else if (!q.landed) {
-      if (q.ballistic) {
-        q.v[1] -= g * dt;  // r43c: a thrown hat keeps its throw
-      } else {
-        // Falls at its own pace, drifting side to side, tumbling.
-        const float settle = 1.0f - std::exp(-2.6f * dt);
-        q.v[1] += (-q.fallSpeed - q.v[1]) * settle;
-        if (q.v[1] > 0.0f) q.v[1] -= g * dt;  // still rising out of a cannon
-        const float t = q.age * q.flutterFreq + q.flutterPhase;
-        const float tx = std::sin(t) * q.flutterAmp, tz = std::cos(t * 0.8f + 1.3f) * q.flutterAmp * 0.7f;
-        const float side = 1.0f - std::exp(-1.6f * dt);
-        q.v[0] += (tx - q.v[0]) * side;
-        q.v[2] += (tz - q.v[2]) * side;
-      }
-      const float prevY = q.p[1];
+      // Falls at its own pace, drifting side to side, tumbling.
+      const float settle = 1.0f - std::exp(-2.6f * dt);
+      q.v[1] += (-q.fallSpeed - q.v[1]) * settle;
+      if (q.v[1] > 0.0f) q.v[1] -= g * dt;  // still rising (knocked off the scorer's head)
+      const float t = q.age * q.flutterFreq + q.flutterPhase;
+      const float tx = std::sin(t) * q.flutterAmp, tz = std::cos(t * 0.8f + 1.3f) * q.flutterAmp * 0.7f;
+      const float side = 1.0f - std::exp(-1.6f * dt);
+      q.v[0] += (tx - q.v[0]) * side;
+      q.v[2] += (tz - q.v[2]) * side;
+      const float prevX = q.p[0], prevY = q.p[1], prevZ = q.p[2];
       for (int a = 0; a < 3; ++a) q.p[a] += q.v[a] * dt;
       float dq[4];
       quat_axis_angle(q.axis, q.spin * dt, dq);
@@ -743,7 +751,41 @@ void step_particles(const Scene& sc, const Scale& k, float dt) {
           }
         }
       }
-      if (q.p[1] <= landY || onHead) {
+      // r44e (Lance: the pieces "should react to falling on" the banner too): it is a solid panel.
+      // A piece that would pass through its face goes back out the side it came from, bouncing off;
+      // one that comes down on its top edge stays there (and fades like everywhere else).
+      bool onBanner = false;
+      if (sc.bannerValid) {
+        const float yawB = 2.0f * std::atan2(sc.bannerPose.orientation.y, sc.bannerPose.orientation.w);
+        const float nx = std::sin(yawB), nz = std::cos(yawB);  // its face's normal, toward you
+        const float rx = nz, rz = -nx;                          // along its width
+        const XrVector3f& c = sc.bannerPose.position;
+        const float hw = 0.5f * sc.bannerWidth, hh = 0.5f * sc.bannerHeight;
+        const float lx = (q.p[0] - c.x) * rx + (q.p[2] - c.z) * rz;
+        const float ly = q.p[1] - c.y;
+        const float lz = (q.p[0] - c.x) * nx + (q.p[2] - c.z) * nz;
+        const float prevLz = (prevX - c.x) * nx + (prevZ - c.z) * nz;
+        if (std::fabs(lx) < hw) {
+          if (prevY - c.y >= hh + lift - 0.02f && ly < hh + lift && std::fabs(lz) < 0.05f) {
+            landY = c.y + hh + lift;
+            onBanner = true;
+            q.p[0] -= lz * nx;  // onto the edge itself
+            q.p[2] -= lz * nz;
+          } else if (std::fabs(ly) < hh && (lz > 0.0f) != (prevLz > 0.0f)) {
+            const float side = prevLz > 0.0f ? 1.0f : -1.0f;
+            q.p[0] += (side * 0.012f - lz) * nx;
+            q.p[2] += (side * 0.012f - lz) * nz;
+            const float vn = q.v[0] * nx + q.v[2] * nz;
+            if (vn * side < 0.0f) {  // still going into it: reflected, losing most of it
+              q.v[0] -= 1.6f * vn * nx;
+              q.v[2] -= 1.6f * vn * nz;
+            }
+            q.v[0] += 0.3f * side * nx;  // and a nudge clear of it
+            q.v[2] += 0.3f * side * nz;
+          }
+        }
+      }
+      if (q.p[1] <= landY || onHead || onBanner) {
         q.p[1] = landY;
         q.landed = true;
         q.onScorer = onHead;
@@ -772,8 +814,10 @@ void step_particles(const Scene& sc, const Scale& k, float dt) {
         q.v[1] = 0.6f;
         q.v[2] = frand(-0.4f, 0.4f);
       }
-      keep = q.age < 25.0f;
+      keep = q.age < q.life;  // r44: fades there like on the floor, no heap on the head either
     } else {
+      // r44: a landed piece only fades out where it fell (q.life is that fade, a fraction of a
+      // second), so nothing builds up into heaps on the floor or the table.
       keep = q.age < q.life;
     }
     if (keep) s.parts[w++] = q;
@@ -1291,6 +1335,41 @@ uint32_t write_occluders(const Scene& sc, float* out) {
     tri(w[0], w[1], w[2]);
     tri(w[0], w[2], w[3]);
   }
+  // r44e (Lance: the celebration pieces "should not go through them even appearance wise"): the
+  // life-size scorer as a ten-sided column a little inside the one the pieces bounce off, and the
+  // goal banner, so a piece behind either is hidden by it instead of drawn over it.
+  if (sc.scorerValid) {
+    constexpr int kSides = 10;
+    const float r = 0.9f * sc.scorerRadius;
+    const float y0 = sc.scorerFeet.y, y1 = sc.scorerFeet.y + sc.scorerHeight;
+    XrVector3f ring0[kSides], ring1[kSides];
+    for (int i = 0; i < kSides; ++i) {
+      const float a = 6.2831853f * i / kSides;
+      const float x = sc.scorerFeet.x + r * std::cos(a), z = sc.scorerFeet.z + r * std::sin(a);
+      ring0[i] = XrVector3f{x, y0, z};
+      ring1[i] = XrVector3f{x, y1, z};
+    }
+    const XrVector3f top{sc.scorerFeet.x, y1, sc.scorerFeet.z};
+    for (int i = 0; i < kSides; ++i) {
+      const int j = (i + 1) % kSides;
+      tri(ring0[i], ring0[j], ring1[j]);
+      tri(ring0[i], ring1[j], ring1[i]);
+      tri(top, ring1[i], ring1[j]);
+    }
+  }
+  if (sc.bannerValid) {
+    const float hw = 0.5f * sc.bannerWidth, hh = 0.5f * sc.bannerHeight;
+    const float corners[4][3] = {{-hw, -hh, 0}, {hw, -hh, 0}, {hw, hh, 0}, {-hw, hh, 0}};
+    XrVector3f w[4];
+    for (int i = 0; i < 4; ++i) {
+      float r[3];
+      rotate(sc.bannerPose.orientation, corners[i], r);
+      w[i] = XrVector3f{r[0] + sc.bannerPose.position.x, r[1] + sc.bannerPose.position.y,
+                        r[2] + sc.bannerPose.position.z};
+    }
+    tri(w[0], w[1], w[2]);
+    tri(w[0], w[2], w[3]);
+  }
   return n;
 }
 
@@ -1363,7 +1442,7 @@ void goal(int team, int character, bool superStrike, bool hyper, bool ownGoal) {
   s.stage = Stage::Raining;
   s.stageTime = 0.0f;
   s.sinceGoal = 0.0f;
-  // Super Bowl, every goal: four cannons in three waves, a fireworks barrage, pyro, a flash.
+  // Super Bowl, every goal: three waves of confetti from the sky, a fireworks barrage, pyro, a flash.
   s.cannonWavesLeft = ownGoal ? 1 : 3;
   s.cannonTimer = 0.0f;
   s.cannonWave = 0;
@@ -1478,7 +1557,7 @@ bool update(const Scene& sc) {
     while (s.hatAccum >= 1.0f && s.hatsLeft > 0) {
       s.hatAccum -= 1.0f;
       --s.hatsLeft;
-      throw_hat(sc);
+      throw_hat(sc, k);
     }
   }
 
@@ -1515,12 +1594,9 @@ bool update(const Scene& sc) {
   }
   s.rainAccum += rate * dt;
   const XrVector3f head = head_of(sc);
-  XrVector3f center = head;
-  if (sc.tabletop && sc.mr) {
-    center.x = 0.5f * (head.x + sc.tablePos.x);
-    center.z = 0.5f * (head.z + sc.tablePos.z);
-  }
-  const float top = sc.mr ? std::max(sc.floorY + 2.3f, head.y + 0.45f) : sc.floorY + k.rainHeight;
+  const RainArea area = rain_area(sc, k);
+  const XrVector3f center = area.centre;
+  const float top = area.top;
   while (s.rainAccum >= 1.0f) {
     s.rainAccum -= 1.0f;
     const float a = frand(0.0f, 6.2831853f), r = k.rainRadius * std::sqrt(frand(0.0f, 1.0f));
@@ -1608,15 +1684,16 @@ bool render(const Scene& sc, XrCompositionLayerProjection* layer) {
     if (q.kind == kKindSpark) {
       const float t = q.age / q.life;
       alpha = 1.0f - t * t;
-    } else if (q.landed && q.age > q.life - 1.0f) {
-      alpha = std::max(0.0f, q.life - q.age);
+    } else if (q.landed) {
+      alpha = std::max(0.0f, 1.0f - q.age / std::max(q.life, 0.05f));  // r44: the whole rest is the fade
     }
     const uint32_t b = bucket_of(q);
     Instance& o = inst[first[b] + filled[b]++];
     o.posSize[0] = q.p[0];
     o.posSize[1] = q.p[1];
     o.posSize[2] = q.p[2];
-    o.posSize[3] = q.size;
+    // r44: and shrinks as it fades (the 3D pieces write depth, so alpha alone reads as a pop).
+    o.posSize[3] = q.landed ? q.size * (0.3f + 0.7f * alpha) : q.size;
     std::memcpy(o.quat, q.q, sizeof(o.quat));
     o.color1 = q.c1;
     o.color2 = q.c2;

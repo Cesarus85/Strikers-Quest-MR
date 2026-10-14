@@ -33,6 +33,7 @@
 #include "xr_fx.h"  // goal celebration effects
 #include "xr_net.hpp" // online 1v1 (include/port/xr_net.h)
 #include "xr_text.h"  // r42: the goal banner and the crowd volume panel
+#include "xr_voice.h" // r44: voice chat, its switch on the pause panel
 #include "../../include/port/xr_net.h"
 
 #include <algorithm>
@@ -81,6 +82,8 @@ extern "C" void GXAuroraSetStereo(unsigned char on, const float* tLeft, const fl
 // the drain itself.
 extern "C" void GXAuroraXrEyePass(unsigned char begin, unsigned char slot, unsigned char samples,
                                   unsigned char coverage);
+// r44e: the coverage mode for the next draws inside the open eye pass (the life-size scorer, solid).
+extern "C" void GXAuroraXrCoverage(unsigned char mode);
 extern "C" void AuroraGXSync(void);
 // extern/aurora/lib/gfx/texture.cpp: anisotropic filtering for every mipmapped texture.
 extern "C" void aurora_xr_set_texture_anisotropy(unsigned int n);
@@ -95,7 +98,8 @@ static void ensure_fx();
 // r42, below: your crowd volume (load, the mixer's crowd controls, the paused right stick).
 void load_crowd_level();
 void update_crowd_mix();
-void crowd_slider_input(float stickX);
+void settings_input(XrVector2f stick);  // r44g: the pause settings panel
+void load_view_height();
 
 namespace {
 
@@ -324,6 +328,7 @@ struct State {
   bool focused = false;
 
   bool hasPassthroughExt = false;
+  bool colorPassthrough = true;  // r44f: the room in colour (Quest 3/3S/Pro); false on a Quest 2
   bool hasRefreshRateExt = false;
   bool hasPerfSettingsExt = false;
   bool hasThreadSettingsExt = false;
@@ -448,9 +453,14 @@ struct State {
   // swapchains' acquire + wait, the CPU fallback wait for Dawn, the effects layer, xrEndFrame.
   uint64_t eyeFenceNs = 0, swapNs = 0, cpuWaitNs = 0, fxNs = 0, xrEndNs = 0;
   bool gameplayLive = false;          // the match is being played (not a cutscene/replay/menu)
+  uint64_t superStrikeNs = 0;         // r44e: the last game frame a Super Strike was under way
   bool fxReady = false;               // the celebration renderer is up (started at the first goal)
   bool dropLogged = false;            // the jumbotron's down position was logged for this replay
   float screenLift = 0.0f;            // r43c: meters the screen is raised over the scorer (eases)
+  // r44: meters the Tabletop field is raised out of the way while the scorer is out (eases), and
+  // whether you took hold of it during this show (then it stays where you put it).
+  float tableLift = 0.0f;
+  bool tableLiftOff = false;
   bool bringTable = false;            // put the Tabletop field in front of you (left stick tap)
   bool celebBuzz = false;             // this goal is the player's: buzz with the cannon waves
   bool testWipe = false;              // self-test: Game.cpp plays the white-flash wipe once
@@ -490,6 +500,9 @@ struct State {
   int crowdLevel = 6;                 // 0..10; 6 = the game's own loudness
   uint64_t sliderShownUntilNs = 0;
   uint64_t crowdRepeatNs = 0;         // right stick held: the next step
+  int settingsStickDirY = 0;          // r44g: the right stick's last up/down push while paused
+  int settingsRow = 0;                // r44g: the settings row picked (0 crowd, 1 voice, 2 height)
+  int viewHeightCm = 0;               // r44g: your eye height in the stadium, + higher (xr_view_height.txt)
   bool sliderPlaced = false;
   XrPosef sliderPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
   float charScale = 1.5f;             // Tabletop: players drawn this much bigger (xr_tune "charscale")
@@ -500,9 +513,19 @@ struct State {
   PADStatus localPad{};               // this headset's pad, this input sync
   bool port1Active = false;           // pad 1 fed from the network (online match)
   double loopIntervalEma = 0.0;       // ns between headset loop iterations, smoothed
+  uint64_t focusBackNs = 0;           // r44: the loop timing counts again from here (focus regained)
+  uint64_t onlineSinceNs = 0;         // r44d: when this online match began, 0 offline
+  uint64_t slowSinceNs = 0;           // r44d: since when the loop has been too slow, 0 = it isn't
+  int lastModeKey = -1;               // r44g: the view (tabletop / room bits) last loop
+  uint64_t modeChangedNs = 0;         // r44g: when it last changed
   bool onlineHalfRate = false;        // online and too slow: 3D view every other game frame
   uint32_t onlineParity = 0;
   bool stadiumHalf = false;           // r42b: Jumbotron · Stadium eyes every other frame (xr_tune)
+  // r44 (players: input lag): wait up to kHandoffWaitNs after xrBeginFrame for the render worker to
+  // submit the eyes just recorded, so they go out this display frame and not the next (xr_tune
+  // "handoffwait <0|1>"), and how often that landed since the last stats line.
+  bool handoffWait = true;
+  uint32_t handoffSame = 0, handoffLate = 0;
   uint32_t stadiumParity = 0;
   uint32_t prevItemButtons = 0;       // X / Y / Z last input sync, for the press log
   int buzzWave = 0;                   // cannon waves already buzzed
@@ -531,7 +554,8 @@ State g;
 std::vector<uint8_t> g_bannerPixels;
 std::atomic<bool> g_bannerReady{false};
 constexpr uint32_t kBannerW = 1024, kBannerH = 560;  // r43d: 420 + the stats line
-constexpr uint32_t kSliderW = 640, kSliderH = 200;
+constexpr uint32_t kSliderW = 640, kSliderH = 380;  // r44g: the settings panel's three rows
+constexpr int kViewHeightMinCm = -60, kViewHeightMaxCm = 100;  // r44g
 
 // xr_quest.cpp is built without include/ on its path: the mixer's crowd controls (port/audio.h).
 extern "C" void PortAudioSetCrowdUser(float gain, int spatial, float headYaw);
@@ -653,7 +677,20 @@ bool create_instance() {
 
   XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
   systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-  return xr_ok(xrGetSystem(g.instance, &systemInfo, &g.system), "xrGetSystem");
+  if (!xr_ok(xrGetSystem(g.instance, &systemInfo, &g.system), "xrGetSystem")) {
+    return false;
+  }
+  // r44f: whether this headset shows your room in colour (Quest 3, 3S, Pro) or not (Quest 2: grey,
+  // and its recordings show black there). Lance: the Super Strike screen is for the latter only; with
+  // colour passthrough it was taken away on purpose, so the captain is seen in the air on the table.
+  XrSystemPassthroughProperties2FB pt2{XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES2_FB};
+  XrSystemProperties sysProps{XR_TYPE_SYSTEM_PROPERTIES};
+  if (g.hasPassthroughExt) sysProps.next = &pt2;
+  if (xr_ok(xrGetSystemProperties(g.instance, g.system, &sysProps), "xrGetSystemProperties")) {
+    g.colorPassthrough = g.hasPassthroughExt && (pt2.capabilities & XR_PASSTHROUGH_CAPABILITY_COLOR_BIT_FB) != 0;
+    XLOG("headset: %s, %s passthrough", sysProps.systemName, g.colorPassthrough ? "colour" : "no colour");
+  }
+  return true;
 }
 
 bool create_vulkan_device() {
@@ -1060,7 +1097,9 @@ int8_t stick_axis(float v) {
 }
 
 void apply_stick(XrVector2f v, int8_t* outX, int8_t* outY) {
-  constexpr float kDeadzone = 0.12f;
+  // r44 (players: input lag): 0.05, was 0.12. The game's own PADClampCircle drops another 15/127 on
+  // top, so a push only started to move at about a fifth of the way; now at about a sixth.
+  constexpr float kDeadzone = 0.05f;
   const float mag = std::sqrt(v.x * v.x + v.y * v.y);
   if (mag < kDeadzone) {
     *outX = 0;
@@ -1336,6 +1375,12 @@ void sync_input() {
       const bool holdL = g.tabletop && get_float(a.squeezeL) > 0.6f;
       const int hands = (holdL && haveL ? 1 : 0) | (g.table.rightGrab && haveR ? 2 : 0);
       if (hands != g.table.grabHands) {
+        // r44: taken hold of while it is raised for the scorer: it stays up there, in your hand.
+        if (hands != 0 && g.tableLift > 0.0f) {
+          g.table.position.y += g.tableLift;
+          g.tableLift = 0.0f;
+          g.tableLiftOff = true;
+        }
         // Taking hold or letting go with one hand: fresh baselines, so the field never jumps.
         if (hands == 3) {
           const float dx = handR.x - handL.x, dy = handR.y - handL.y, dz = handR.z - handL.z;
@@ -1406,7 +1451,7 @@ void sync_input() {
       apply_stick(stickL, &status.stickX, &status.stickY);
       const XrVector2f stickR = get_vec2(a.stickR);
       apply_stick(stickR, &status.substickX, &status.substickY);
-      crowd_slider_input(stickR.x);  // r42: while paused, the crowd volume
+      settings_input(stickR);  // r42/r44/r44g: while paused, the settings panel
       update_crowd_mix();
 
       // Stick clicks, the two buttons a GameCube pad never had. Double taps switch modes, so a
@@ -1992,16 +2037,50 @@ float stadium_scale() {
 // electric fence, whose wall then filled the near view.
 constexpr float kStandY = -10.5f;
 
+// r44g: the life-size stadium's ground: your floor, moved down by the height you picked in the pause
+// settings (or up, for less), so a seated or a short player can see the pitch as from standing.
+float stadium_floor_y() { return g.floorY - 0.01f * static_cast<float>(g.viewHeightCm); }
+
+// The floor things stand on in the current mode: the room's, or the stadium's.
+float mode_floor_y() { return g.mrMode ? g.floorY : stadium_floor_y(); }
+
+// r44h (Lance: Waluigi "was still 5 feet tall ... i want the main characters to be taller than 5 feet,
+// like walugi should be like 6'5" DK should be the same", and Daisy taller): the life-size scorer's
+// height in meters by eCharacterClass. r42-r44g stood every one at PORT_SCORER_HEIGHT (5 ft).
+float scorer_height_m() {
+  static const float kHeights[12] = {
+      1.73f,  // Birdo        5'8"
+      1.78f,  // Daisy        5'10"
+      1.96f,  // Donkey Kong  6'5"
+      1.70f,  // Hammer Bro   5'7"
+      1.57f,  // Koopa        5'2"
+      1.83f,  // Luigi        6'0"
+      1.73f,  // Mario        5'8"
+      1.80f,  // Peach        5'11"
+      1.42f,  // Toad         4'8"
+      1.96f,  // Waluigi      6'5"
+      1.75f,  // Wario        5'9"
+      1.78f,  // Yoshi        5'10"
+  };
+  const int c = g.scorer.cls;
+  return c >= 0 && c < 12 ? kHeights[c] : PORT_SCORER_HEIGHT;
+}
+
 M4 stadium_model() {
   // Game (0, kStandY, 0) lands on the floor under the start pose, whatever the (self-test) turn:
   // the stand point maps to (0, 0, -kStandY) before the turn and scale.
   const float s = stadium_scale(), yaw = g.stadiumYawDebug;
   const float c = -kStandY;
   return m4_game_to_room(s, yaw,
-                         XrVector3f{-c * std::sin(yaw) * s, g.floorY, -c * std::cos(yaw) * s});
+                         XrVector3f{-c * std::sin(yaw) * s, stadium_floor_y(), -c * std::cos(yaw) * s});
 }
 
-M4 table_model() { return m4_game_to_room(g.table.scale, g.table.yaw, g.table.position); }
+// r44: where the field is shown: where you put it, raised while the scorer celebrates (tableLift).
+XrVector3f table_shown_pos() {
+  return XrVector3f{g.table.position.x, g.table.position.y + g.tableLift, g.table.position.z};
+}
+
+M4 table_model() { return m4_game_to_room(g.table.scale, g.table.yaw, table_shown_pos()); }
 
 // --- r42: the life-size goal scorer in the room ---
 
@@ -2062,14 +2141,14 @@ void plan_scorer() {
     dx = tx / tlen;
     dz = tz / tlen;
   }
-  g.scorer.spot = {head.position.x + dx * want, g.floorY, head.position.z + dz * want};
+  g.scorer.spot = {head.position.x + dx * want, mode_floor_y(), head.position.z + dz * want};  // r44g
   // It comes in from farther out, a little to one side (alternating per goal), and leaves that way.
   const float side = (g.scorer.shows++ & 1) != 0 ? -1.0f : 1.0f;
   float ax = 0.0f, az = 0.0f;
   rotate(dx, dz, 0.35f * side, &ax, &az);
   g.scorer.away = {ax, 0.0f, az};
   const float run = PORT_SCORER_SPEED * (PORT_SCORER_ARRIVE - PORT_SCORER_APPEAR);
-  g.scorer.spawn = {g.scorer.spot.x + ax * run, g.floorY, g.scorer.spot.z + az * run};
+  g.scorer.spawn = {g.scorer.spot.x + ax * run, g.scorer.spot.y, g.scorer.spot.z + az * run};
   g.scorer.planned = true;
   XLOG("scorer: spot (%.2f, %.2f, %.2f) %.1f m out, from (%.2f, %.2f)", g.scorer.spot.x, g.scorer.spot.y,
        g.scorer.spot.z, want, g.scorer.spawn.x, g.scorer.spawn.z);
@@ -2113,7 +2192,7 @@ float screen_lift_over_scorer(const XrVector3f& center, float width, float heigh
   const float ds = std::sqrt(sx * sx + sz * sz), dq = std::sqrt(qx * qx + qz * qz);
   if (ds < 0.5f || dq < 0.5f) return 0.0f;
   const float bannerW = 1.1f * std::max(1.0f, ds / 2.5f);  // as drawn (below, PortXrEndFrame)
-  const float bannerTop = g.scorer.spot.y + PORT_SCORER_HEIGHT + 0.18f +
+  const float bannerTop = g.scorer.spot.y + scorer_height_m() + 0.18f +
                           bannerW * static_cast<float>(kBannerH) / static_cast<float>(kBannerW);
   // Side by side already: the angle between them beats their half widths.
   const float cosAngle = std::max(-1.0f, std::min(1.0f, (sx * qx + sz * qz) / (ds * dq)));
@@ -2126,7 +2205,7 @@ M4 scorer_model() {
   XrVector3f pos{};
   float yaw = 0.0f;
   scorer_place(&pos, &yaw);
-  const float scale = PORT_SCORER_HEIGHT / std::max(0.2f, g.scorer.height);
+  const float scale = scorer_height_m() / std::max(0.2f, g.scorer.height);  // r44h: by character
   return m4_game_to_room(scale, yaw, pos);
 }
 
@@ -2726,6 +2805,9 @@ void poll_triggers() {
       } else if (std::strncmp(line, "stadiumsplit", 12) == 0) {
         // r43 "stadiumsplit <0|1>": Tabletop · Stadium's stadium as its own layer, one eye a frame
         g.stadiumSplit = std::atoi(line + 12) != 0;
+      } else if (std::strncmp(line, "handoffwait", 11) == 0) {
+        // r44 "handoffwait <0|1>": wait briefly for this frame's eyes before ending the XR frame
+        g.handoffWait = std::atoi(line + 11) != 0;
       } else if (std::strncmp(line, "stadiumhalf", 11) == 0) {
         // "stadiumhalf <0|1>": Jumbotron · Stadium's eyes every other game frame (A/B)
         g.stadiumHalf = std::atoi(line + 11) != 0;
@@ -2984,6 +3066,11 @@ void log_stats() {
          "their pipeline, %.1f not eligible",
          d[0] / frames, d[1] / frames, d[2] / frames, d[5] / 1000.0 / frames, d[3] / frames, d[4] / frames);
   }
+  if (g.handoffSame + g.handoffLate > 0) {  // r44
+    XLOG("eye hand-off: %u in their own display frame, %u a frame late (wait %s)", g.handoffSame, g.handoffLate,
+         g.handoffWait ? "on" : "off");
+  }
+  g.handoffSame = g.handoffLate = 0;
   g.eyeFenceNs = g.swapNs = g.cpuWaitNs = g.fxNs = g.xrEndNs = 0;
   std::memset(g.loopNs, 0, sizeof(g.loopNs));
   g.xrWaitNsSinceStats = 0;
@@ -3034,6 +3121,7 @@ extern "C" int PortXrInit(void) {
   create_passthrough();
   load_screens();       // r42: where you left the big screens
   load_crowd_level();   // r42: your crowd volume
+  load_view_height();   // r44g: your stadium height
 
   aurora_xr_set_surface_suppressed(true);
   aurora_xr_set_frame_callback(&on_aurora_frame, nullptr);
@@ -3374,6 +3462,12 @@ extern "C" int PortXrStereoEyeLayer(int eye, int layer, float view[16], float pr
     std::memcpy(g.measureStart, used, sizeof(used));
     g.decodedAtMeasure = aurora_xr_decoded_bytes();
   }
+  // r44e (Lance: "make the characters that run up, SOLID, i should not be seeing through them"): over
+  // passthrough a draw's own alpha was the scorer's coverage, and the characters' blended surfaces
+  // (alpha-edged textures, drawn blended with depth writes) let the room show through. For the scorer
+  // those count as solid, as over the split stadium (r43b's ball). It is the last layer; the pass's
+  // end puts the mode back.
+  if (kind == kLayerScorer && g.mrMode) GXAuroraXrCoverage(2);
   const M4 model = kind == kLayerTable ? table_model() : (kind == kLayerScorer ? scorer_model() : stadium_model());
   // r43: single pass sends from the centre with the union field of view (plan_single_pass); the
   // split stadium from the one eye it is drawn for this frame.
@@ -3554,7 +3648,7 @@ extern "C" void PortXrScorerFrame(int phase, float phaseTime, float height, int 
       }).detach();
     }
     XLOG("scorer: %s (class %d, %.2f units tall -> x%.2f), side %d", scorer_name(characterClass), characterClass,
-         height, PORT_SCORER_HEIGHT / std::max(0.2f, height), side);
+         height, scorer_height_m() / std::max(0.2f, height), side);
   }
   if (phase == 3 && sc.prevPhase != 3) {
     sc.leaveFrom = sc.prevPhase == 0 ? sc.spot : sc.lastPos;
@@ -3609,23 +3703,76 @@ void update_crowd_mix() {
   PortAudioSetCrowdUser(static_cast<float>(g.crowdLevel) / 6.0f, g.mrMode ? 0 : 1, std::atan2(fx, -fz));
 }
 
-// While paused: the right stick left/right steps the crowd volume (held: every quarter second).
-void crowd_slider_input(float stickX) {
-  if (!g.paused) return;
+// r44g: your eye height in the life-size stadium (a friend of Lance's: "more controllability for the
+// environment, as playing at different eye heights makes it hard to play comfortably"), kept beside
+// the crowd volume. + puts you higher: the stadium goes down by that much under you.
+std::string view_height_path() {
+  const char* home = std::getenv("STRIKERS_HOME");
+  return std::string(home != nullptr && *home != '\0' ? home : "/storage/emulated/0/Strikers") + "/xr_view_height.txt";
+}
+
+void load_view_height() {
+  if (FILE* f = std::fopen(view_height_path().c_str(), "r")) {
+    int cm = 0;
+    if (std::fscanf(f, "%d", &cm) == 1) g.viewHeightCm = std::max(kViewHeightMinCm, std::min(kViewHeightMaxCm, cm));
+    std::fclose(f);
+  }
+}
+
+void save_view_height() {
+  if (FILE* f = std::fopen(view_height_path().c_str(), "w")) {
+    std::fprintf(f, "%d\n", g.viewHeightCm);
+    std::fclose(f);
+  }
+}
+
+// r44g, the pause settings panel (r42's crowd volume, r44's voice switch, the stadium height): the
+// right stick up/down picks a row, left/right changes it (held: every quarter second).
+void settings_input(XrVector2f stick) {
+  if (!g.paused) {
+    g.settingsStickDirY = 0;
+    g.crowdRepeatNs = 0;
+    return;
+  }
   const uint64_t t = now_ns();
-  if (std::fabs(stickX) < 0.6f) {
+  auto changed = [&]() {
+    g.slider.hasImage = false;  // redrawn at the next frame
+    g.sliderShownUntilNs = t + 2000000000ull;
+  };
+  const int dirY = stick.y > 0.7f ? 1 : (stick.y < -0.7f ? -1 : 0);
+  if (dirY != g.settingsStickDirY) {
+    g.settingsStickDirY = dirY;
+    const int row = std::max(0, std::min(2, g.settingsRow - dirY));  // up = the row above
+    if (dirY != 0 && row != g.settingsRow) {
+      g.settingsRow = row;
+      changed();
+    }
+  }
+  if (std::fabs(stick.x) < 0.6f || std::fabs(stick.y) > 0.7f) {
     g.crowdRepeatNs = 0;
     return;
   }
   if (g.crowdRepeatNs != 0 && t < g.crowdRepeatNs) return;
-  g.crowdRepeatNs = t + (g.crowdRepeatNs == 0 ? 400000000ull : 220000000ull);
-  const int level = std::max(0, std::min(10, g.crowdLevel + (stickX > 0.0f ? 1 : -1)));
-  if (level == g.crowdLevel) return;
-  g.crowdLevel = level;
-  g.slider.hasImage = false;  // redrawn at the next frame
-  g.sliderShownUntilNs = t + 2000000000ull;
-  save_crowd_level();
-  XLOG("crowd volume %d/10", g.crowdLevel);
+  const bool first = g.crowdRepeatNs == 0;
+  g.crowdRepeatNs = t + (first ? 400000000ull : 220000000ull);
+  const int step = stick.x > 0.0f ? 1 : -1;
+  if (g.settingsRow == 0) {
+    const int level = std::max(0, std::min(10, g.crowdLevel + step));
+    if (level == g.crowdLevel) return;
+    g.crowdLevel = level;
+    save_crowd_level();
+    XLOG("crowd volume %d/10", g.crowdLevel);
+  } else if (g.settingsRow == 1) {
+    if (!first || (step > 0) == xrvoice::enabled()) return;  // once per push: right on, left off
+    xrvoice::set_enabled(step > 0);
+  } else {
+    const int cm = std::max(kViewHeightMinCm, std::min(kViewHeightMaxCm, g.viewHeightCm + 5 * step));
+    if (cm == g.viewHeightCm) return;
+    g.viewHeightCm = cm;
+    save_view_height();
+    XLOG("stadium height: you %+d cm", g.viewHeightCm);
+  }
+  changed();
 }
 
 // The game's full-screen flashes (the white flash in its replay wipes, the Super Strike photo
@@ -3712,6 +3859,22 @@ extern "C" int PortXrEyeViewAllowed(int view, int tableLayer) {
   return (view >= 0 && view < 32 && ((mask >> view) & 1u) != 0) ? 1 : 0;
 }
 
+// r44e (Lance: "can we bring back the one screen for the superstrike??", and a Quest 2 player's video
+// where nothing showed during one): a Super Strike is live play, so the Tabletop screen had only the
+// HUD, which the game hides for the shot: nothing at all. While one is under way (and a moment after)
+// the screen gets the game's whole picture again, the shot and its meter, beside the field.
+extern "C" void PortXrSetSuperStrike(int on) {
+  if (!g.active || on == 0 || g.colorPassthrough) return;
+  if (now_ns() - g.superStrikeNs > 2000000000ull) XLOG("super strike: the screen shows it, beside the field");
+  g.superStrikeNs = now_ns();
+}
+
+// r44f (Lance: "just do that for the quest 2 folks ... non passthrough headsets though this is what
+// they need"): with colour passthrough the shot is watched on the table, the captain in the air.
+static bool super_strike_shown() {
+  return !g.colorPassthrough && g.superStrikeNs != 0 && now_ns() - g.superStrikeNs < 600000000ull;
+}
+
 extern "C" int PortXrHudOnlyNormalView(void) {
   static int s_enabled = -1;
   if (s_enabled < 0) {
@@ -3719,7 +3882,7 @@ extern "C" int PortXrHudOnlyNormalView(void) {
     s_enabled = (e != nullptr && e[0] == '0') ? 0 : 1;
   }
   return (s_enabled && g.active && g.tabletop && stereo_mode() && !g.stereoFailed && g.gameplayLive &&
-          g.hasProjection)
+          g.hasProjection && !super_strike_shown())
              ? 1
              : 0;
 }
@@ -3849,10 +4012,42 @@ extern "C" int PortXrBeginFrame(void) {
     g.tickAccumNs += static_cast<int64_t>(tickNow - g.lastTickNs);
     // Online and slower than ~64 loops a second with game frames to run: halve the 3D view's rate
     // for the rest of the match (PortXrStereoFrameBegin).
-    g.loopIntervalEma = 0.9 * g.loopIntervalEma + 0.1 * static_cast<double>(tickNow - g.lastTickNs);
-    if (!PortNetOnline()) {
+    // r44 (Lance: online "got a bit wonky" with the Quest menu up): not while the app is out of focus
+    // (the Quest menu, the headset off) nor for 3 s after: the system slows the app then, and that
+    // alone used to halve the 3D view for the rest of the match. Back in focus, it starts over.
+    // r44d (r44c log: "too slow for 60 online" a moment into every online match): the match loads in
+    // one long frame just after it goes online, and that one interval tipped the average. Now only
+    // ordinary iterations count (a load or a stall over 50 ms is not slowness), nothing in the first
+    // 10 s online, and the average has to stay over the line for 3 s.
+    const bool online = PortNetOnline() != 0;
+    if (online && g.onlineSinceNs == 0) g.onlineSinceNs = tickNow;
+    if (!online) g.onlineSinceNs = 0;
+    // r44g (r44f log: tripped by the first seconds in the stadium, while its pipelines were built): a
+    // view change starts it over, with the same 10 s grace as the match start.
+    const int modeKey = (g.tabletop ? 1 : 0) | (g.mrMode ? 2 : 0);
+    if (modeKey != g.lastModeKey) {
+      g.lastModeKey = modeKey;
+      g.modeChangedNs = tickNow;
+      if (g.onlineHalfRate) XLOG("net: view changed, the 3D view back to every frame");
       g.onlineHalfRate = false;
-    } else if (!g.onlineHalfRate && stereo_mode() && g.loopIntervalEma > 15.5e6) {
+    }
+    const uint64_t interval = tickNow - g.lastTickNs;
+    if (!g.focused) {
+      g.focusBackNs = tickNow + 3000000000ull;
+      g.loopIntervalEma = 13.9e6;
+    } else if (tickNow >= g.focusBackNs && interval < 50000000ull) {
+      g.loopIntervalEma = 0.9 * g.loopIntervalEma + 0.1 * static_cast<double>(interval);
+    }
+    const bool slow = online && g.focused && tickNow >= g.focusBackNs && tickNow - g.onlineSinceNs > 10000000000ull &&
+                      tickNow - g.modeChangedNs > 10000000000ull && stereo_mode() && g.loopIntervalEma > 15.5e6;
+    if (!slow) {
+      g.slowSinceNs = 0;
+    } else if (g.slowSinceNs == 0) {
+      g.slowSinceNs = tickNow;
+    }
+    if (!online) {
+      g.onlineHalfRate = false;
+    } else if (!g.onlineHalfRate && slow && tickNow - g.slowSinceNs > 3000000000ull) {
       g.onlineHalfRate = true;
       XLOG("net: this headset is too slow for 60 online; its 3D view now updates every other frame");
     }
@@ -3940,15 +4135,20 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
   }
 
   // Even without an XR frame to end, this game frame's eye images go back from Dawn (finish).
+  int justRecorded = -1;  // r44: the eye slot this game frame drew into
   if (ranGameFrame) {
     const uint64_t t0 = now_ns();
     if (g.singlePass) {
       // r43: no wait for the render worker. This frame's eyes go out once it has submitted them
       // (finish_released_slots below, this or a following display frame), and the screen shows the
       // newest frame read back by then; the next game frame meanwhile runs alongside.
+      // r44 (players: input lag): except with the big screen in your room, which has no eyes to
+      // overlap: without the wait its picture was the frame before last (r42 waited here, at 60).
+      if (!stereo_mode()) aurora::gfx::synchronize();
       upload_latest_frame();
       if (g.stereoThisFrame) {
         g.stereoThisFrame = false;
+        justRecorded = static_cast<int>(g.slot);
         g.slot = (g.slot + 1) % kStereoSlots;
       }
     } else {
@@ -3964,6 +4164,25 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
     ++g.gameFramesSinceStats;
   }
   if (g.singlePass) {
+    // r44: this frame's eyes usually reach the render worker's submit within a millisecond or two of
+    // here; waiting that long puts them in this display frame instead of the next (a whole 13.9 ms
+    // later, with poses a frame old). Bounded, so a slow worker costs no more than before.
+    if (justRecorded >= 0 && frameOk) {
+      constexpr uint64_t kHandoffWaitNs = 2500000ull;
+      const uint64_t waitFrom = now_ns();
+      if (g.handoffWait) {
+        while (g_slotState[justRecorded].load(std::memory_order_acquire) == 1 &&
+               now_ns() - waitFrom < kHandoffWaitNs) {
+          usleep(100);
+        }
+      }
+      if (g_slotState[justRecorded].load(std::memory_order_acquire) == 1) {
+        ++g.handoffLate;
+      } else {
+        ++g.handoffSame;
+      }
+      g.cpuWaitNs += now_ns() - waitFrom;
+    }
     finish_released_slots();
   }
   if (!frameOk) {
@@ -4004,21 +4223,37 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
         g.floorY = floor.pose.position.y;
       }
     }
-    scene.floorY = g.floorY;
+    scene.floorY = mode_floor_y();  // r44g: the stadium's ground in the stadium
     scene.mr = g.mrMode;
     scene.tabletop = g.tabletop && !g.stereoFailed;
-    scene.tablePos = g.table.position;
+    {
+      // r44 (Lance: "if in tabletop mode, the tabletop gets lifted for a second so the player could
+      // celebrate in front of them", he had to move it out of the way himself): while the scorer is
+      // out the field floats up above your view, and comes back down once the show is over. The
+      // scorer's spot is beyond the field, so the field was right in the way.
+      const bool show = scene.tabletop && scorer_shown() && g.scorer.planned;
+      if (!show) g.tableLiftOff = false;
+      float target = 0.0f;
+      if (show && !g.tableLiftOff && g.table.grabHands == 0) {
+        const float headY = g.headValid ? g.headPose.position.y : g.table.position.y + 0.6f;
+        target = std::max(0.0f, headY + 1.2f - g.table.position.y);
+      }
+      const float dt = scene.dt > 0.0f ? std::min(scene.dt, 0.1f) : 1.0f / 72.0f;
+      g.tableLift += (target - g.tableLift) * std::min(1.0f, dt * (target > g.tableLift ? 4.0f : 2.5f));
+      if (g.tableLift < 0.003f && target == 0.0f) g.tableLift = 0.0f;
+    }
+    scene.tablePos = table_shown_pos();
     scene.tableYaw = g.table.yaw;
     scene.tableScale = g.table.scale;
     scene.charScale = PortXrCharacterScale();
     scene.stadiumScale = stadium_scale();
-    scene.stadiumOrigin = XrVector3f{0.0f, g.floorY, kStandY * stadium_scale()};
+    scene.stadiumOrigin = XrVector3f{0.0f, stadium_floor_y(), kStandY * stadium_scale()};
     // r42: the confetti lands on the life-size scorer, not through it.
     scene.scorerValid = scorer_shown() && g.scorer.planned;
     scene.scorerStill = g.scorer.phase == 2;
     scene.scorerFeet = g.scorer.lastPos;
-    scene.scorerRadius = 0.3f;
-    scene.scorerHeight = PORT_SCORER_HEIGHT;
+    scene.scorerRadius = 0.25f;  // r44e: nearer the body (it also hides what falls behind it, xr_fx)
+    scene.scorerHeight = scorer_height_m();
   }
 
   if (g.frameState.shouldRender) {
@@ -4087,8 +4322,8 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
           finalY = ceiling - 0.1f - 0.5f * height;
         } else {
           anchor = XrVector3f{head.x + dx * 14.0f, 0.0f, head.z + dz * 14.0f};
-          startY = g.floorY + 30.0f;
-          finalY = g.floorY + 3.0f + 0.5f * height;
+          startY = stadium_floor_y() + 30.0f;
+          finalY = stadium_floor_y() + 3.0f + 0.5f * height;
         }
         anchor.y = startY + (finalY - startY) * drop;
         const float yaw = std::atan2(head.x - anchor.x, head.z - anchor.z);  // +Z of the quad toward you
@@ -4106,6 +4341,38 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
         // The scoreboard: the broadcast view (score, time, replays) hanging over the field.
         const float half = 0.5f * g.table.yaw;
         quad.pose.orientation = {0.0f, std::sin(half), 0.0f, std::cos(half)};
+        XrVector3f eyes = g.views[0].pose.position;
+        if (sceneViews) {
+          eyes = XrVector3f{0.5f * (scene.views[0].pose.position.x + scene.views[1].pose.position.x),
+                            0.5f * (scene.views[0].pose.position.y + scene.views[1].pose.position.y),
+                            0.5f * (scene.views[0].pose.position.z + scene.views[1].pose.position.z)};
+        }
+        // r44e (Lance: the Super Strike's screen "off to the side not right in the middle of where the
+        // superstrike animation is occuring especially on tabletop mode"): beside the field on your
+        // right, its bottom a little above the field, turned to you. r40-r44 hung the meter over the
+        // captain and the game's picture over the middle of the field, both in front of the 3D play.
+        // r44f: on headsets without colour passthrough only (Quest 2); with it, as before.
+        auto beside_table = [&](float width, float height) {
+          const XrVector3f t = table_shown_pos();
+          float fx = t.x - eyes.x, fz = t.z - eyes.z;
+          const float len = std::max(0.1f, std::sqrt(fx * fx + fz * fz));
+          fx /= len;
+          fz /= len;
+          const float rx = -fz, rz = fx;  // your right, looking at the field
+          float reach = 0.0f;              // how far the field reaches that way
+          for (int i = 0; i < 4; ++i) {
+            const XrVector3f c = table_point((i & 1) ? 20.6f : -20.6f, (i & 2) ? 12.1f : -12.1f, 0.0f);
+            reach = std::max(reach, (c.x - t.x) * rx + (c.z - t.z) * rz);
+          }
+          const float out = reach + 0.08f + 0.5f * width;
+          const XrVector3f at{t.x + rx * out, t.y + 0.12f + 0.5f * height, t.z + rz * out};
+          const float yaw = std::atan2(eyes.x - at.x, eyes.z - at.z);  // +Z of the quad toward you
+          quad.pose.orientation = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
+          quad.pose.position = at;
+          quad.size.width = width;
+          quad.size.height = height;
+          return at;
+        };
         if (PortXrHudOnlyNormalView() && g.sts.shown) {
           // The Super Strike meter (Lance, alpha 1: the score-bar crop below cut it off, so the
           // timing presses had nothing to aim at). ShootToScoreMeter.cpp draws it in the middle of
@@ -4118,21 +4385,19 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
           // Readable at any table size; 8 game units (about a fifth of the field's width) by default.
           const float width = std::min(0.5f, std::max(0.2f, 8.0f * g.table.scale));
           const float height = width * static_cast<float>(hh) / static_cast<float>(hw);
-          // Its bottom edge above the "that's you" arrow over the captain's head.
-          XrVector3f anchor =
-              table_point(g.sts.game[0], g.sts.game[1], g.sts.game[2] + 4.5f * PortXrCharacterScale());
-          anchor.y += 0.5f * height;
-          XrVector3f head = g.views[0].pose.position;
-          if (sceneViews) {
-            head = XrVector3f{0.5f * (scene.views[0].pose.position.x + scene.views[1].pose.position.x),
-                              0.5f * (scene.views[0].pose.position.y + scene.views[1].pose.position.y),
-                              0.5f * (scene.views[0].pose.position.z + scene.views[1].pose.position.z)};
+          XrVector3f anchor;
+          if (!g.colorPassthrough) {
+            anchor = beside_table(width, height);  // r44f: beside the field (no colour passthrough)
+          } else {
+            // Its bottom edge above the "that's you" arrow over the captain's head.
+            anchor = table_point(g.sts.game[0], g.sts.game[1], g.sts.game[2] + 4.5f * PortXrCharacterScale());
+            anchor.y += 0.5f * height;
+            const float yaw = std::atan2(eyes.x - anchor.x, eyes.z - anchor.z);  // +Z of the quad toward you
+            quad.pose.orientation = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
+            quad.pose.position = anchor;
+            quad.size.width = width;
+            quad.size.height = height;
           }
-          const float yaw = std::atan2(head.x - anchor.x, head.z - anchor.z);  // +Z of the quad toward you
-          quad.pose.orientation = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
-          quad.pose.position = anchor;
-          quad.size.width = width;
-          quad.size.height = height;
           if (!g.sts.logged) {
             g.sts.logged = true;
             XLOG("super strike meter: panel (%.2f, %.2f, %.2f), %.2f x %.2f m, picture %dx%d at (%d, %d)",
@@ -4150,12 +4415,16 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
           quad.subImage.imageRect.extent = {w, h};
           const float width = 0.9f;
           const float height = width * static_cast<float>(h) / static_cast<float>(w);
-          quad.pose.position = {g.table.position.x, g.table.position.y + 0.4f + 0.5f * height, g.table.position.z};
+          quad.pose.position = {g.table.position.x, table_shown_pos().y + 0.4f + 0.5f * height, g.table.position.z};
           quad.size.width = width;
           quad.size.height = height;
+        } else if (!g.colorPassthrough) {
+          // The game's whole picture (r44f, without colour passthrough: the Super Strike's shot too,
+          // super_strike_shown): beside the field.
+          beside_table(0.75f, 0.75f * aspect);
         } else {
           const float width = 0.75f;
-          quad.pose.position = {g.table.position.x, g.table.position.y + 0.42f + 0.5f * width * aspect,
+          quad.pose.position = {g.table.position.x, table_shown_pos().y + 0.42f + 0.5f * width * aspect,
                                 g.table.position.z};
           quad.size.width = width;
           quad.size.height = width * aspect;
@@ -4209,10 +4478,15 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
         const float sdx = g.scorer.spot.x - g.headPose.position.x, sdz = g.scorer.spot.z - g.headPose.position.z;
         const float width = 1.1f * pop * std::max(1.0f, std::sqrt(sdx * sdx + sdz * sdz) / 2.5f);
         const float height = width * static_cast<float>(kBannerH) / static_cast<float>(kBannerW);
-        const XrVector3f at{g.scorer.spot.x, g.scorer.spot.y + PORT_SCORER_HEIGHT + 0.18f + 0.5f * height,
+        const XrVector3f at{g.scorer.spot.x, g.scorer.spot.y + scorer_height_m() + 0.18f + 0.5f * height,
                             g.scorer.spot.z};
         place_panel(bannerQuad, g.banner, at, width);
         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&bannerQuad);
+        // r44e: a solid for the celebration pieces (they land on it, bounce off it, hide behind it).
+        scene.bannerValid = true;
+        scene.bannerPose = bannerQuad.pose;
+        scene.bannerWidth = bannerQuad.size.width;
+        scene.bannerHeight = bannerQuad.size.height;
       }
     }
     // r42: the crowd volume while paused (and two seconds after a change), in front of you.
@@ -4220,7 +4494,9 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
     if (g.paused || nowNs < g.sliderShownUntilNs) {
       if (!g.slider.hasImage) {
         std::vector<uint8_t> pixels(static_cast<size_t>(kSliderW) * kSliderH * 4);
-        xrtext::crowd_slider(pixels.data(), kSliderW, kSliderH, g.crowdLevel, 10);
+        const int voice = !xrvoice::enabled() ? 0 : (xrvoice::mic_allowed() ? 1 : 2);  // r44
+        xrtext::settings_panel(pixels.data(), kSliderW, kSliderH, g.crowdLevel, 10, voice, g.viewHeightCm,
+                               g.settingsRow);
         panel_upload(g.slider, pixels.data(), kSliderW, kSliderH);
       }
       if (!g.sliderPlaced && g.headValid) {
@@ -4336,6 +4612,7 @@ extern "C" int PortXrScreenFlash(float, float, float, float) { return 0; }
 extern "C" int PortXrTakeTestWipe(void) { return 0; }
 extern "C" int PortXrTakeTestItem(void) { return 0; }
 extern "C" void PortXrSetStsMeter(int, float, float, float, float, float) {}
+extern "C" void PortXrSetSuperStrike(int) {}
 extern "C" int PortXrTakeTestSts(void) { return 0; }
 extern "C" void PortXrScorerFrame(int, float, float, int, int, int) {}
 extern "C" void PortXrScorerStats(int, int, int) {}

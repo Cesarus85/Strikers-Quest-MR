@@ -246,7 +246,8 @@ list(REMOVE_ITEM PLATFORM_SOURCES
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_quest.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_fx.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp"
-     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_text.cpp")
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_text.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_voice.cpp")  # r44: Quest only, with Opus (below)
 
 # src/platform/operator_new.cpp is the one file in the tree that is not C++11.
 list(REMOVE_ITEM PLATFORM_SOURCES
@@ -710,6 +711,25 @@ if(STRIKERS_AURORA)
         target_link_libraries(strikers PRIVATE strikers_openxr_loader vulkan android log)
         set(STRIKERS_OPENXR_LOADER "${_xr_root}/lib/${ANDROID_ABI}/libopenxr_loader.so" CACHE INTERNAL "")
         message(STATUS "strikers: Quest OpenXR layer ON (${_xr_root})")
+
+        # strikers-quest r44: online voice chat (src/platform/xr_voice.cpp): the microphone and the
+        # friend's voice through AAudio, coded with Opus (BSD-3-Clause), a static library built from
+        # the release tarball. Only the codec: no programs, tests, packaging, or the neural extras.
+        include(FetchContent)
+        set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+        set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(opus
+            URL https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz
+            URL_HASH SHA256=65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(opus)
+        set_target_properties(opus PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_sources(strikers_xr PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_voice.cpp")
+        target_link_libraries(strikers_xr PRIVATE Opus::opus)
+        target_link_libraries(strikers PRIVATE opus aaudio)
     endif()
 endif()
 

@@ -64,6 +64,10 @@ int PortXrTakeTestItem(void);
  * picture's width/height (ShootToScoreMeter.cpp centres it there while PortXrHudOnlyNormalView).
  * In Tabletop the scoreboard shows that square over the captain instead of the score bar. */
 void PortXrSetStsMeter(int shown, float x, float y, float z, float halfU, float halfV);
+/* strikers-quest r44e: a Super Strike is under way (a captain charging or shooting it), once per
+ * game frame. In Tabletop the screen then shows the game's whole picture (the shot, the meter),
+ * beside the field, instead of the HUD-only score bar. */
+void PortXrSetSuperStrike(int on);
 /* Self-test (xr_fx "sts"): 1 once when PortCelebrationPoll should show the meter for 3 s. */
 int PortXrTakeTestSts(void);
 

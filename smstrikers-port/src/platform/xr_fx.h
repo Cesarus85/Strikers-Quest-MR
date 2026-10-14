@@ -1,7 +1,7 @@
 // strikers-quest: goal celebration effects for the headset (xr_fx.cpp), driven by xr_quest.cpp.
 //
 // Confetti in the scorer's colours with their signature piece mixed in (small lit 3D meshes,
-// xr_fx_mesh.h), cannons, fireworks, landing on the floor (and on the Tabletop field), and the
+// xr_fx_mesh.h) raining from the sky and fading where it lands (r44: no heaps), fireworks, and the
 // game's own screen flashes over your whole view, drawn by a small renderer of its own on the OpenXR
 // Vulkan device into a projection layer of its own, composited over everything else. It works the
 // same in all four modes and at the display rate, whatever the game's frame rate. The Tabletop field
@@ -58,6 +58,11 @@ struct Scene {
   bool screenValid = false;
   XrPosef screenPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
   float screenWidth = 0.0f, screenHeight = 0.0f;
+  // r44e: the goal banner over the scorer (a quad turned to you), a solid the pieces bounce off and
+  // land on, and that hides what falls behind it.
+  bool bannerValid = false;
+  XrPosef bannerPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+  float bannerWidth = 0.0f, bannerHeight = 0.0f;
 };
 
 bool init(const DeviceInfo& device);

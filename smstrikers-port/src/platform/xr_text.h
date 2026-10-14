@@ -15,7 +15,9 @@ void goal_banner(uint8_t* rgba, int w, int h, const char* name, uint32_t teamRgb
                  bool hatTrick);
 
 // The crowd volume panel shown while the game is paused: a title, `steps` bar segments with `level`
-// of them lit, and a hint line.
-void crowd_slider(uint8_t* rgba, int w, int h, int level, int steps);
+// of them lit, and a hint line. r44: and the voice chat switch, `voice` 0 off, 1 on, 2 on but the
+// microphone not allowed. r44g: the pause settings panel: those two and your eye height in the
+// stadium (heightCm, + higher), with `row` (0 crowd, 1 voice, 2 height) picked; h about 0.6 w.
+void settings_panel(uint8_t* rgba, int w, int h, int level, int steps, int voice, int heightCm, int row);
 
 }  // namespace xrtext

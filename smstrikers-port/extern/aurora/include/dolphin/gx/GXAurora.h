@@ -119,6 +119,12 @@ extern "C" {
  */
 #define GX_AURORA_XR_EYE_PASS 0x0044
 
+/**
+ * strikers-quest r44e: switch the open eye pass's coverage mode (u8: 0 off, 1 over passthrough, 2 over
+ * a drawn layer) for the draws that follow, in-band (aurora_gx_set_xr_coverage_mode).
+ */
+#define GX_AURORA_XR_COVERAGE 0x0045
+
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
 
@@ -214,6 +220,12 @@ void GXAuroraSetStereo(u8 on, const f32* tLeft, const f32* tRight, const f32* cl
  * (GX_AURORA_XR_EYE_PASS). slot / samples / coverage are read only when opening.
  */
 void GXAuroraXrEyePass(u8 begin, u8 slot, u8 samples, u8 coverage);
+
+/**
+ * strikers-quest r44e: the coverage mode for the draws that follow inside the open eye pass
+ * (GX_AURORA_XR_COVERAGE); the pass's end sets it back to 0.
+ */
+void GXAuroraXrCoverage(u8 mode);
 
 /**
  * strikers-quest: 0 = off, 1 = draws inside a decode scope, 2 = every eligible draw. Read by the

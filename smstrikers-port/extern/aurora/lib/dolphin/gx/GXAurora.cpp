@@ -124,6 +124,11 @@ void GXAuroraSetStereo(u8 on, const f32* tLeft, const f32* tRight, const f32* cl
   }
 }
 
+void GXAuroraXrCoverage(u8 mode) {
+  GX_WRITE_AURORA(GX_AURORA_XR_COVERAGE);
+  GX_WRITE_U8(mode);
+}
+
 void GXAuroraXrEyePass(u8 begin, u8 slot, u8 samples, u8 coverage) {
   GX_WRITE_AURORA(GX_AURORA_XR_EYE_PASS);
   GX_WRITE_U8(begin != 0 ? 1 : 0);

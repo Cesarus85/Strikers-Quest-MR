@@ -48,16 +48,20 @@ And around the game:
   - **A living crowd**: louder in close games, quieter in blowouts, a roar on every goal, and in the
     stadium the crowd sounds come from where the stands are.
 - **Goal celebrations in 3D**: confetti in the scorer's colours plus their own piece (coins for
-  Mario, hearts for Peach, bananas for Donkey Kong, and so on), confetti cannons, streamers, foil,
-  pyro and fireworks, landing on your floor and on the table. In the Tabletop modes the goal replay
-  plays on a jumbotron that drops from the ceiling (or the sky, in the stadium). Skip the replay and
-  it all stops.
+  Mario, hearts for Peach, bananas for Donkey Kong, and so on), streamers, foil, pyro and fireworks,
+  raining down from the sky and fading where they land (no heaps). In the Tabletop modes the goal
+  replay plays on a jumbotron that drops from the ceiling (or the sky, in the stadium), and the table
+  floats up out of the way while the scorer celebrates. Skip the replay and it all stops.
 - **The game's own white flashes** (replay wipes, the Super Strike flash) light up your whole view,
   not just the picture.
 - **Controller rumble**: the game's rumble reaches the Touch controllers, with an extra buzz on your
   goals.
-- **Online 1v1 with room codes**: one player hosts and reads out a four-letter code, the other types
-  it in. Each player keeps their own view mode.
+- **Online 1v1**: **Quick match** pairs you with anyone else searching, or one player hosts and reads
+  out a four-letter code and the other types it in. Each player keeps their own view mode.
+- **Voice chat** in online matches (alpha 1.4): turn it on with **Voice chat** on the app's first
+  screen, or in the game's pause settings.
+- **Pause settings**: crowd volume, voice chat, and your eye height in the stadium (for playing seated,
+  or if you're shorter or taller).
 - **Your disc image as it is**: `.iso`, or Dolphin's `.rvz` and `.wia` with any compression. Pick
   it with **Choose game file**, which also tells you if a file isn't the right game.
 - **Updates from inside the app**: when there's a new version, the first screen offers **Update
@@ -141,7 +145,7 @@ clicks**, so you can't do it by accident mid-match.
 | **Right stick: click twice fast** | Swap between the **big screen** and the **tabletop** (a mini 3D pitch you can walk around) |
 | **Right stick: click once** | Big screen: change its size (3 sizes) |
 | **Left stick: click once** | Bring the table or the big screen back in front of you |
-| **Menu button** while paused, then the **right stick** | Crowd volume (0 to 10) |
+| **Right stick, while paused** | The settings panel: **up/down** picks crowd volume, voice chat or stadium height, **left/right** changes it |
 
 So there are four views, and you can mix them any way you like:
 
@@ -175,11 +179,20 @@ A Bluetooth gamepad paired to the headset also works for offline play.
 Both of you need the **same release** of the app, set to the **same version** (both Classic or both
 Plus), and your own game files.
 
-1. **One of you hosts:** press **Host an online match**. You get a 4-letter code. Tell it to your
-   friend, then press **Start**.
+1. **One of you hosts:** press **Host an online match**. You get a fresh 4-letter code. Tell it to
+   your friend, then press **Start**.
 2. **The other joins:** press **Join with a code**, type the code, press **Join**.
 3. **Both of you:** pick **Grudge Match** on the main menu, choose your teams and start. Whoever
    gets there first waits a moment on the loading screen. Then you're playing each other.
+
+**No friend online? Quick match** (alpha 1.4): press **Quick match** and wait. As soon as someone
+else on the same release and Version is searching, you're both put in the same room. Then both of
+you: **Grudge Match**, pick your team, start.
+
+**Voice chat** (alpha 1.4): press **Voice chat** on the app's first screen to turn it on (the first
+time, allow the microphone). In an online match you hear each other; it's off until you turn it on,
+and you can turn it off again in the game's pause settings (right stick down to **Voice chat**, then
+left). If only one of you has it on, neither hears the other.
 
 ## If something goes wrong
 
@@ -234,8 +247,10 @@ More about online play:
   players are playing, a third headset in the room is ignored. Join also takes your own made-up
   code (3 to 8 letters or numbers), as long as you both type the same one.
 - The connection goes through a small free relay (see [The room server](#the-room-server)). It only
-  passes game messages along (button presses and team picks) and stores nothing. Like any web
-  service, its host sees your IP address.
+  passes game messages along (button presses, team picks, and with voice chat on, your voice) and
+  stores nothing. Like any web service, its host sees your IP address.
+- How far behind your presses land online depends on the connection to that relay: the game measures
+  it before the match and sets the delay for the whole match (usually about a tenth of a second).
 
 
 ## Known issues
@@ -243,12 +258,15 @@ More about online play:
 - **Jumbotron · Stadium runs a little under 60 frames a second** (about 56 to 58), and Tabletop ·
   Stadium can dip during goal replays and celebrations. The other modes run at a full 60. The game
   itself always runs at its normal speed.
-- **Online, the slower headset sets the pace for both.** A headset that can't keep up in a 3D mode
-  redraws its 3D view every other frame for the rest of that match.
+- **Online, the slower headset sets the pace for both.** A headset that keeps falling behind in a 3D
+  mode redraws its 3D view every other frame until you change view.
 - **Online uses the Touch controllers only.** A Bluetooth gamepad's buttons are not sent to your
   friend, so don't use one in an online match.
 - **Both players need the same release of the app, and the same version (Classic or Plus).** With
-  different ones the two headsets ignore each other and each plays offline. Players on different disc regions are untested.
+  different ones the two headsets ignore each other and each plays offline. Players on different disc
+  regions are untested.
+- **Quest 2:** its passthrough is grey, so in Tabletop the Super Strike shows on a screen beside the
+  table. On a Quest 3 you watch it happen on the table itself.
 - **The game's video clips don't play** (the intro and attract movies): this build has no video
   decoder. Everything else runs without them.
 - **Don't open the app from the Library during a match.** The panel comes up in front of the game
@@ -316,7 +334,8 @@ Notes:
 ## The room server
 
 Online play goes through a tiny relay: a Cloudflare Worker with one Durable Object per room code,
-which passes each message to everyone in the room. Its source is in [`server/`](server/), with
+which passes each message to everyone in the room, and one more per Version and release that pairs
+up Quick match players. Its source is in [`server/`](server/), with
 instructions to run your own copy on Cloudflare's free plan and point the game at it (one line,
 `kServerHost` in `smstrikers-port/src/platform/xr_net.cpp`). Both players need builds that point at
 the same server.
@@ -333,7 +352,7 @@ the same server.
 - [bylaws/libadrenotools](https://github.com/bylaws/libadrenotools): custom GPU driver loading,
   inherited from the Android port and still built in.
 - [SDL](https://github.com/libsdl-org/SDL), [Dawn](https://dawn.googlesource.com/dawn),
-  [zstd](https://github.com/facebook/zstd) (reads `.rvz`) and the
+  [zstd](https://github.com/facebook/zstd) (reads `.rvz`), [Opus](https://opus-codec.org) (voice chat) and the
   [Khronos OpenXR loader](https://github.com/KhronosGroup/OpenXR-SDK).
 - Button prompt artwork by [Kenney](https://www.kenney.nl) (CC0).
 - Quest mixed-reality port and the Quest 3 Strikers art: [LanceSweatpants](https://github.com/LanceSweatpants).
@@ -366,7 +385,7 @@ up:
 - **Bundled libraries**, each under its own file: Aurora (MIT, `extern/aurora/LICENSE`), MusyX (MIT,
   `extern/musyx/LICENSE`), zstd (BSD, `extern/zstd/LICENSE`), and Kenney's button prompts (CC0,
   `assets/input-prompts/LICENSE-Kenney.txt`). SDL3 (zlib), Dawn (BSD 3-Clause), libadrenotools
-  (BSD 2-Clause), the OpenXR loader (Apache 2.0) and Aurora's other dependencies (abseil, fmt,
+  (BSD 2-Clause), the OpenXR loader (Apache 2.0), Opus (BSD 3-Clause) and Aurora's other dependencies (abseil, fmt,
   FreeType, Dear ImGui, libpng, SQLite, xxHash) are downloaded at build time, each under its own
   license.
 - **The Android port's own code** (`luisxl15/Strikers-Android-Port`) has no license stated by its

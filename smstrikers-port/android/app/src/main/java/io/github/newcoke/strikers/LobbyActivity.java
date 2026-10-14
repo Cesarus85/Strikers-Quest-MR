@@ -49,8 +49,19 @@ import java.util.List;
  *
  * <p>r43: the Version button, Classic (alpha 1.2's game) or Plus (with what was added after it), and
  * why an online match didn't start (the friend on the other Version or another release).
+ *
+ * <p>r44: Quick match (a queue on the room server pairs you with anyone else searching on the same
+ * Version and release, and both get a room code) and the Voice chat switch.
  */
 public class LobbyActivity extends Activity {
+
+    // strikers-quest r44: the room server (src/platform/xr_net.cpp kServerHost) and the online protocol
+    // (kProtocol there): quick match only pairs headsets that can play each other.
+    private static final String SERVER_HOST = "strikers-rooms.strikers-rooms.workers.dev";
+    private static final int ONLINE_PROTOCOL = 5;
+    private static final int REQUEST_MIC = 44;
+    private int quickToken;          // r44: the search running (a newer one, or Cancel, ends it)
+    private boolean searching;       // r44: the quick match page is up
 
     static final String EXTRA_ROOM = "room";
     // strikers-quest r43: the Version the panel shows (StrikersHome.CLASSIC / PLUS), so a game already
@@ -62,8 +73,6 @@ public class LobbyActivity extends Activity {
     static final String NOTE_VERSION_CHANGED = "version-changed";
     private static final String PREFS = "lobby";
     private static final String LAST_CODE = "lastCode";
-    // strikers-quest r39b: the code Host showed last, so it shows the same one after a relaunch.
-    private static final String LAST_HOSTED = "lastHosted";
     // No I, O, 0 or 1: a code is read out loud or off a headset.
     private static final String CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
     private static final int BG = Color.rgb(16, 20, 28);
@@ -112,8 +121,11 @@ public class LobbyActivity extends Activity {
         showOnlineNote();
         note("Quest alpha. Online: both players pick Grudge Match in the same room, on the same Version.");
         page.addView(button("Play offline", true, v -> start("")));
-        page.addView(button("Host an online match", false, v -> showHost(hostedCode())));
+        page.addView(button("Quick match", true, v -> showQuick()));  // r44
+        // r44d (Lance: "make sure everyones codes randomize"): a fresh code every time, not the last one.
+        page.addView(button("Host an online match", false, v -> showHost(newCode())));
         page.addView(button("Join with a code", false, v -> showJoin()));
+        page.addView(button("Voice chat: " + (voiceOn() ? "On" : "Off"), false, v -> toggleVoice()));  // r44
         page.addView(button("Choose game file", false, v -> showChooser(null, null)));
         TextView game = note(gameStatus());
         game.setTextSize(14);
@@ -415,16 +427,7 @@ public class LobbyActivity extends Activity {
         }, "strikers-scan").start();
     }
 
-    /** strikers-quest r39b: the code Host showed last, or a fresh one the first time. */
-    private String hostedCode() {
-        String code = clean(prefs.getString(LAST_HOSTED, ""));
-        return code.length() >= 3 ? code : newCode();
-    }
-
     private void showHost(String code) {
-        // strikers-quest r39b: remembered as soon as it is shown, since that is when it gets read
-        // out to the friend. Host shows it again until "New code".
-        prefs.edit().putString(LAST_HOSTED, code).apply();
         page.removeAllViews();
         onHome = false;
         title("Your room code", 24);
@@ -481,8 +484,173 @@ public class LobbyActivity extends Activity {
         field.requestFocus();
     }
 
-    private void start(String code) {
-        if (!code.isEmpty()) prefs.edit().putString(LAST_CODE, code).apply();
+    /**
+     * strikers-quest r44, Quick match (Lance: "a quick match option that would put you in with anyone
+     * else online"): wait in the room server's queue for this Version and release (wss://.../quick/
+     * P5 or C5) until someone else is there; both get the same fresh room code and start with it, the
+     * way Join does.
+     */
+    private void showQuick() {
+        if (!readyToStart(null)) return;  // the game file first: no use matching a game that can't start
+        page.removeAllViews();
+        onHome = false;
+        searching = true;
+        title("Quick match", 24);
+        final TextView status = note("Looking for another player...");
+        status.setTextColor(ACCENT);
+        String edition = StrikersHome.edition(this);
+        note("You'll be matched with someone playing " + editionName(edition) + " right now. Then both of"
+                + " you: Grudge Match, pick your team, start." + (voiceOn() ? "" : "\nVoice chat is off"
+                + " (the button on the first page)."));
+        page.addView(button("Cancel", false, v -> {
+            ++quickToken;
+            searching = false;
+            showHome();
+        }));
+        final int token = ++quickToken;
+        final String key = (StrikersHome.CLASSIC.equals(edition) ? "C" : "P") + ONLINE_PROTOCOL;
+        new Thread(() -> quickLoop(token, key, status), "strikers-quick").start();
+    }
+
+    /** strikers-quest r44: the queue, off the UI thread, reconnecting until matched or cancelled. */
+    private void quickLoop(int token, String key, TextView status) {
+        final byte[] buf = new byte[512];
+        int failures = 0;
+        while (token == quickToken) {
+            final int h = NetWs.open(SERVER_HOST, 443, "/quick/" + key, 6000);
+            if (h < 0) {
+                failures++;
+                runOnUiThread(() -> status.setText("Can't reach the online server. Trying again...\n(Check the"
+                        + " Quest's internet connection.)"));
+                android.os.SystemClock.sleep(Math.min(10000, 2000L * failures));
+                continue;
+            }
+            failures = 0;
+            String code = null;
+            long lastPing = android.os.SystemClock.elapsedRealtime();
+            while (token == quickToken) {
+                final long now = android.os.SystemClock.elapsedRealtime();
+                if (now - lastPing >= 5000) {
+                    if (!NetWs.sendText(h, "ping")) break;
+                    lastPing = now;
+                }
+                final int n = NetWs.recv(h, buf, 500);
+                if (n == -1) break;  // gone: open a new one (the server drops a socket quiet for 20 s)
+                if (n < 0) continue;
+                final String msg = new String(buf, 0, n, StandardCharsets.UTF_8).trim();
+                if (msg.startsWith("match ")) {
+                    code = clean(msg.substring(6));
+                    break;  // at once: the close behind it can come seconds later
+                }
+                if (msg.startsWith("waiting ")) {
+                    final String count = msg.substring(8).trim();
+                    runOnUiThread(() -> {
+                        if (token == quickToken) {
+                            status.setText("Looking for another player..." + ("1".equals(count) ? ""
+                                    : "\n" + count + " players searching"));
+                        }
+                    });
+                }
+            }
+            NetWs.close(h);
+            if (code != null && code.length() >= 3) {
+                final String room = code;
+                runOnUiThread(() -> {
+                    if (token == quickToken) matched(room);
+                });
+                return;
+            }
+        }
+    }
+
+    /** strikers-quest r44: a player was found; a moment to read what to do, then the game starts. */
+    private void matched(String code) {
+        searching = false;
+        page.removeAllViews();
+        title("Player found!", 28);
+        TextView t = note("In the game: Grudge Match, pick your team, start. The match begins when you both"
+                + " have.\n\n(Your room: " + spaced(code) + ")");
+        t.setTextSize(18);
+        final int token = ++quickToken;
+        page.postDelayed(() -> {
+            if (token == quickToken) start(code);
+        }, 3000);
+    }
+
+    // --- strikers-quest r44: Voice chat, voice.txt in the game's folder (src/platform/xr_voice.cpp reads
+    // it at each online match and the pause panel's right stick writes it). Off until turned on here,
+    // where Android's microphone question can be asked without stopping a match.
+
+    private File voiceFile() {
+        return new File(StrikersHome.homeDir(this), "voice.txt");
+    }
+
+    private boolean voiceOn() {
+        return readText(voiceFile(), 8).startsWith("1");
+    }
+
+    private void writeVoice(boolean on) {
+        try (java.io.OutputStream out = new java.io.FileOutputStream(voiceFile())) {
+            out.write((on ? "1\n" : "0\n").getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            android.util.Log.w("strikers", "could not write " + voiceFile(), e);
+        }
+    }
+
+    private void toggleVoice() {
+        if (voiceOn()) {
+            writeVoice(false);
+            showHome();
+            return;
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            voiceGranted();
+        } else {
+            requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, REQUEST_MIC);
+        }
+    }
+
+    private void voiceGranted() {
+        writeVoice(true);
+        // Whether the headset cancels its own speakers' sound out of the microphone (the game and the
+        // friend's voice): if not, the friend hears an echo. For the log, to tell from a test.
+        android.util.Log.i("strikers", "voice chat on; echo canceller "
+                + (android.media.audiofx.AcousticEchoCanceler.isAvailable() ? "available" : "NOT available"));
+        showHome();
+        note("Voice chat is on: in online matches you hear each other. Turn it off here, or in the game's"
+                + " pause screen (right stick down).");
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode != REQUEST_MIC) return;
+        if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            voiceGranted();
+        } else {
+            writeVoice(false);
+            showHome();
+            note("Voice chat needs the microphone. Press Voice chat again and choose Allow.").setTextColor(WARN);
+        }
+    }
+
+    /** strikers-quest r44: the panel goes out of sight (headset off, Quest menu): stop searching. */
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (searching) {
+            ++quickToken;
+            searching = false;
+            showHome();
+        }
+    }
+
+    /**
+     * strikers-quest r44, out of start(): the file access switch and a readable game file, before a
+     * match (or a quick-match search) is started. False when it went to ask for one of them instead.
+     */
+    private boolean readyToStart(String code) {
         // strikers-quest r39b: the disc usually sits in Download, which takes "all files access". A
         // friend who only installed the APK has not given it yet: open that switch from here and
         // stay on this page, rather than start the game only for it to open the switch and close.
@@ -494,15 +662,21 @@ public class LobbyActivity extends Activity {
             if (accessNote == null || accessNote.getParent() != page) accessNote = note("");
             accessNote.setText("Turn on \"Allow access to manage all files\" so the game can read your"
                     + " disc file, then come back here and press the same button again.");
-            return;
+            return false;
         }
         // r41: no game file, or one the game cannot read: say so and show the list, rather than
         // start a game that closes at once (alpha 1: "it just closes").
         String problem = gameProblem();
         if (problem != null) {
             showChooser(code, problem);
-            return;
+            return false;
         }
+        return true;
+    }
+
+    private void start(String code) {
+        if (!code.isEmpty()) prefs.edit().putString(LAST_CODE, code).apply();
+        if (!readyToStart(code)) return;
         Intent game = new Intent(this, StrikersActivity.class);
         game.putExtra(EXTRA_ROOM, code);
         game.putExtra(EXTRA_EDITION, StrikersHome.edition(this));  // strikers-quest r43

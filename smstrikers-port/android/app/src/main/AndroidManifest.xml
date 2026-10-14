@@ -54,6 +54,9 @@
          com a rede. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- strikers-quest r44: voice chat in online matches (src/platform/xr_voice.cpp), asked for when
+         the player turns it on in the launcher panel. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- Reading the disc image. The app's own directory under Android/data needs no permission at
          all, and that is the path of least resistance; these are for a player who would rather keep

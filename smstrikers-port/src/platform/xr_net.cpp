@@ -19,6 +19,8 @@ extern "C" void PortNetSetFixedStep(int on);  // src/platform/vi.c
 #include <jni.h>
 #include <unistd.h>
 
+#include "xr_voice.h"  // strikers-quest r44: voice frames ride on the input messages
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -66,7 +68,9 @@ constexpr int kServerPort = 443;
 // r39: room server + room codes + resend fix (r38 headsets: 1). r42: 3, the held goal replay (the
 // post-goal show) changes the game's frames, so an r41 and an r42 headset would drift apart.
 // strikers-quest r43: 4, the hello and the start carry the Version (Classic / Plus, edition.h).
-constexpr uint8_t kProtocol = 4;
+// strikers-quest r44: 5, the input message ends with the voice frames (xr_voice.h), and quick match
+// pairs players by Version and protocol (LobbyActivity, the server's /quick/<KEY>).
+constexpr uint8_t kProtocol = 5;
 
 uint64_t now_ms() {
   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -477,6 +481,8 @@ void send_inputs() {
   w.u32(first);
   w.u8(static_cast<uint8_t>(st.localNext - first));
   for (uint32_t f = first; f < st.localNext; ++f) w.bytes(&st.localBuf[f % kRing], sizeof(NetPad));
+  // r44: and the voice frames since the last one (the room server takes messages up to 4096 bytes).
+  xrvoice::append_outgoing(w.v, 3900);
   send(std::move(w.v));
   st.lastSendMs = now_ms();
 }
@@ -515,6 +521,7 @@ void end_online(const char* why) {
   std::memset(st.myHashTag, 0, sizeof(st.myHashTag));
   std::memset(st.peerHashTag, 0, sizeof(st.peerHashTag));
   PortNetSetFixedStep(0);
+  xrvoice::match_end();  // r44
 }
 
 void compare_hash(uint32_t f) {
@@ -538,7 +545,10 @@ void host_start() {
   st.seed = (rd() ^ static_cast<uint32_t>(now_ms())) | 1u;
   // One way is about half the round trip; a frame is 16.7 ms; three frames of slack for jitter and
   // the inputs going out in pairs.
-  st.delay = std::clamp(static_cast<int>((st.rttMs / 2 + 16) / 17) + 3, 5, 20);
+  // strikers-quest r44 (players: input lag): two frames of slack (one for the pairs, one for jitter)
+  // and no floor of 5: a 60 ms round trip now plays 4 frames behind instead of 5, a nearby friend 3
+  // instead of 5. The stall count in the 5 s status line says if a link needs more.
+  st.delay = std::clamp(static_cast<int>((st.rttMs / 2 + 16) / 17) + 2, 3, 20);
   Writer w = header(kStart);
   w.u64(st.myId);
   w.u64(st.peerId);
@@ -672,6 +682,8 @@ void handle(const std::vector<uint8_t>& msg) {
     const uint8_t edition = r.u8();
     const Choice home = read_choice(r);
     const Choice away = read_choice(r);
+    // r44c: optional, from the test friend only (tools/fakefriend): which side the computer plays.
+    const uint8_t cpuPlays = r.ok && r.at < msg.size() ? r.u8() : 0;
     if (!r.ok || guest != st.myId || host != sender) return;
     // r43: never a match on the other Version (the hellos keep the two apart already).
     if (edition != local_edition()) return;
@@ -687,11 +699,13 @@ void handle(const std::vector<uint8_t>& msg) {
     st.match.stadium = home.stadium;
     st.match.optionsSize = home.optionsSize;
     std::memcpy(st.match.options, home.options, sizeof(st.match.options));
+    st.match.cpuPlays = cpuPlays == 1 ? 1 : 0;  // r44c: only the host's own side
     st.frame = 0;  // the host's first inputs may arrive before this headset's frame 0
     std::memset(st.remoteTag, 0, sizeof(st.remoteTag));
     st.lastRemoteMs = 0;
     st.startPending = true;
-    NLOG("net: starting the online match as away (input delay %d frames)", st.delay);
+    NLOG("net: starting the online match as away (input delay %d frames)%s", st.delay,
+         st.match.cpuPlays != 0 ? ", the test friend's side played by this headset's computer" : "");
     break;
   }
   case kInput: {
@@ -708,6 +722,7 @@ void handle(const std::vector<uint8_t>& msg) {
       st.remoteTag[f % kRing] = f + 1;
     }
     st.lastRemoteMs = now;
+    if (r.at < msg.size()) xrvoice::take_incoming(msg.data() + r.at, msg.size() - r.at);  // r44
     break;
   }
   case kHash: {
@@ -738,6 +753,7 @@ void begin_online() {
   st.frontEndFrames = 0;
   PortNetSetFixedStep(1);
   NLOG("net: online, frame 0");
+  xrvoice::match_begin();  // r44
 }
 
 }  // namespace

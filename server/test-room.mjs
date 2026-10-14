@@ -1,6 +1,7 @@
 // Two fake headsets in one room: each sends a few binary messages; both must hear both (the relay
-// echoes to the sender too). Also measures the round trip.  node test-room.mjs [CODE]
-const base = "wss://strikers-rooms.strikers-rooms.workers.dev/room/";
+// echoes to the sender too). Also measures the round trip.  node test-room.mjs [CODE] [base]
+// (base e.g. ws://127.0.0.1:8787 for npx wrangler dev; without it, the server below)
+const base = (process.argv[3] || "wss://strikers-rooms.strikers-rooms.workers.dev").replace(/\/+$/, "") + "/room/";
 const code = process.argv[2] || "TEST";
 
 function open(name) {

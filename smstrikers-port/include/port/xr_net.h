@@ -22,6 +22,9 @@ typedef struct PortNetMatch {
     int stadium;        /* eStadiumID */
     unsigned char options[64]; /* the host's gameplay / power-up / cheat settings, raw */
     int optionsSize;
+    /* strikers-quest r44c: 0 both sides human; 1 home / 2 away played by this headset's computer AI
+     * (only the test friend, tools/fakefriend, asks for it; a real headset never does). */
+    int cpuPlays;
 } PortNetMatch;
 
 /* SuperLoadingScene, every frame its intro slide is done, with this headset's picks and the side

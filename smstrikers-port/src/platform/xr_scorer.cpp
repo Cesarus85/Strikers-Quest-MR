@@ -1,5 +1,6 @@
 // strikers-quest r42: the life-size goal scorer (Lance, after alpha 1.2: a really good looking life
-// size scorer that runs up beside you, 5 ft for every character, celebrates, then runs back to the
+// size scorer that runs up beside you, 5 ft for every character (r44h: each its own height,
+// xr_quest.cpp scorer_height_m), celebrates, then runs back to the
 // field; every goal but a Super Strike; the replay keeps going until it is over, which
 // Presentation.cpp's held replay sees to).
 //
@@ -69,6 +70,46 @@ DrawableCharacter* s_copy = NULL; // the copy (its accumulator is made per show)
 cPN_SAnimController s_ctrl;
 float s_height[NUM_FIELDER_CLASSES]; // game units, measured once per class (0 = not yet)
 
+// r44i (Lance: Waluigi's "legs go through the map"): per class, from the idle pose: how high its
+// lowest joint stands (the toes, about) and which joints sit at the origin there (the root nodes,
+// which follow the pose's placement and are no part of the body), so no later pose sinks below it.
+const int kMaxGroundNodes = 160;
+bool s_groundMeasured[NUM_FIELDER_CLASSES];
+float s_restZ[NUM_FIELDER_CLASSES];
+bool s_rootNode[NUM_FIELDER_CLASSES][kMaxGroundNodes];
+
+// The lowest body joint of the copy's last pose (root nodes left out).
+float lowest_joint(int cls)
+{
+    const cPoseAccumulator* acc = s_copy->mPoseAccumulator;
+    const int n = acc->GetNumNodes() < kMaxGroundNodes ? acc->GetNumNodes() : kMaxGroundNodes;
+    float lo = 1e9f;
+    for (int i = 0; i < n; i++)
+    {
+        if (s_rootNode[cls][i])
+            continue;
+        const float z = acc->GetNodeMatrix(i).m43;
+        if (z == z && z < lo)
+            lo = z;
+    }
+    return lo;
+}
+
+// r44i: the copy's last pose, built with `world`, raised back onto the ground if any of its joints
+// went lower than the character's own standing feet. A jump is left alone; only sinking is undone.
+void keep_on_ground(cCharacter* ch, const nlMatrix4& world)
+{
+    const int cls = (int)ch->m_eCharacterClass;
+    if (cls < 0 || cls >= NUM_FIELDER_CLASSES || !s_groundMeasured[cls])
+        return;
+    const float lo = lowest_joint(cls);
+    if (!(lo < s_restZ[cls] - 0.002f) || lo < -100.0f)
+        return;
+    nlMatrix4 lifted = world;
+    lifted.m43 += s_restZ[cls] - lo;
+    s_copy->mPoseAccumulator->BuildNodeMatrices(lifted);
+}
+
 cCharacter* captain_of(int side)
 {
     if (side < 0 || side > 1 || g_pTeams[side] == NULL)
@@ -103,6 +144,7 @@ void pose(cCharacter* ch, cSAnim* anim, const AnimRetarget* retarget, ePlayMode 
     nlMatrix4 world;
     world.SetIdentity();
     acc->BuildNodeMatrices(world);
+    keep_on_ground(ch, world);  // r44i
 }
 
 // The goal cut-scene's clip, played the way the cut-scene plays it (Nis::Render): with the clip's
@@ -155,6 +197,8 @@ void pose_celebration(cCharacter* ch, float seconds, float height)
     world.m43 = rt.z;
     world.m44 = 1.0f;
     acc->BuildNodeMatrices(world);
+    // r44i: the cut-scene's root height is its own stage's: on Waluigi it put his legs under the pitch.
+    keep_on_ground(ch, world);
 }
 
 // `flip`: mirrored from how the inventory plays it (r43: the wave with the other hand).
@@ -204,6 +248,23 @@ float measure_height(cCharacter* ch, int cls)
     float h = hi - lo;
     pose_inventory(ch, kAnimIdle, 0.0f, true);
     const float head = s_copy->mPoseAccumulator->GetNodeMatrix(ch->m_nHeadJointIndex).m43;
+    // r44i: the standing pose's ground, for keep_on_ground (before it is measured, nothing is moved).
+    if (cls >= 0 && cls < NUM_FIELDER_CLASSES)
+    {
+        const cPoseAccumulator* acc = s_copy->mPoseAccumulator;
+        const int n = acc->GetNumNodes() < kMaxGroundNodes ? acc->GetNumNodes() : kMaxGroundNodes;
+        float rest = 1e9f;
+        for (int i = 0; i < n; i++)
+        {
+            const nlMatrix4& m = acc->GetNodeMatrix(i);
+            s_rootNode[cls][i] = fabsf(m.m41) < 1e-4f && fabsf(m.m42) < 1e-4f && fabsf(m.m43) < 1e-4f;
+            if (!s_rootNode[cls][i] && m.m43 == m.m43 && m.m43 < rest)
+                rest = m.m43;
+        }
+        s_restZ[cls] = rest < 1e8f ? rest : 0.0f;
+        s_groundMeasured[cls] = true;
+        fprintf(stderr, "[port] scorer: class %d stands with its lowest joint at %.3f units\n", cls, s_restZ[cls]);
+    }
     // (Toad's skin is 2.2 x his head joint, Donkey Kong's 2.4: big heads and hunched backs.)
     if (!(h > head * 0.9f && h < head * 3.2f))
         h = head > 0.1f ? head * 1.3f : 1.4f;

@@ -298,15 +298,38 @@ void goal_banner(uint8_t* rgba, int w, int h, const char* name, uint32_t teamRgb
   cv.write(rgba);
 }
 
-void crowd_slider(uint8_t* rgba, int w, int h, int level, int steps) {
+// r44g (r42's crowd volume panel, r44's voice line): the pause settings, one row picked at a time.
+void settings_panel(uint8_t* rgba, int w, int h, int level, int steps, int voice, int heightCm, int row) {
   Canvas cv(w, h);
-  panel(cv, 8.0f, 8.0f, w - 8.0f, h - 8.0f, 0.16f * h, 0.02f * h, rgb(0x000000, 0.9f), rgb(0xFFFFFF, 0.9f),
+  const float u = 0.3125f * w;  // r42's whole panel height: 200 at 640 wide
+  panel(cv, 8.0f, 8.0f, w - 8.0f, h - 8.0f, 0.16f * u, 0.02f * u, rgb(0x000000, 0.9f), rgb(0xFFFFFF, 0.9f),
         rgb(0x1E2A44, 0.92f), rgb(0x0B1020, 0.92f));
-  TextStyle title{0.26f * h, rgb(0xFFFFFF), rgb(0xDDE4F0), rgb(0x05070C), 0.02f * h, rgb(0x000000, 0.0f), 0.0f, 0.0f};
-  draw_text(cv, "CROWD VOLUME", 0.5f * w, 0.25f * h, title);
+  // The rows' bands, top to bottom: crowd volume (title and bar), voice chat, stadium height; the hint.
+  const float band[3][2] = {{0.06f * u, 0.76f * u}, {0.80f * u, 1.18f * u}, {1.22f * u, 1.60f * u}};
+  const float bx0 = 0.04f * w, bx1 = 0.96f * w;
+  if (row >= 0 && row < 3) {  // the picked row: a lighter band with a gold edge
+    const float y0 = band[row][0], y1 = band[row][1];
+    for (int y = static_cast<int>(y0) - 3; y <= static_cast<int>(y1) + 3; ++y) {
+      for (int x = static_cast<int>(bx0) - 3; x <= static_cast<int>(bx1) + 3; ++x) {
+        const float sd = rounded_rect_sd(x + 0.5f, y + 0.5f, bx0, y0, bx1, y1, 0.08f * u);
+        cv.over(x, y, rgb(0xFFD23F, 0.95f), 0.5f - sd);
+        cv.over(x, y, rgb(0x34507A, 0.95f), 0.5f - (sd + 3.0f));
+      }
+    }
+  }
+  auto line_style = [&](float px, bool picked, uint32_t top, uint32_t bottom) {
+    return TextStyle{px, rgb(picked ? 0xFFF7B0 : top), rgb(picked ? 0xFFC21F : bottom), rgb(0x05070C), 0.016f * u,
+                     rgb(0x000000, 0.0f), 0.0f, 0.0f};
+  };
+  auto fitted = [&](const char* text, float px) {
+    const float wide = text_width(text, px), room = 0.86f * w;
+    return wide > room ? px * room / wide : px;
+  };
+  // Crowd volume.
+  draw_text(cv, "CROWD VOLUME", 0.5f * w, 0.22f * u, line_style(0.22f * u, row == 0, 0xFFFFFF, 0xDDE4F0));
   const float x0 = 0.08f * w, x1 = 0.92f * w, gap = 0.012f * w;
   const float segW = ((x1 - x0) - gap * (steps - 1)) / steps;
-  const float y0 = 0.45f * h, y1 = 0.68f * h;
+  const float y0 = 0.42f * u, y1 = 0.64f * u;
   for (int i = 0; i < steps; ++i) {
     const float sx0 = x0 + i * (segW + gap), sx1 = sx0 + segW;
     const bool lit = i < level;
@@ -318,8 +341,24 @@ void crowd_slider(uint8_t* rgba, int w, int h, int level, int steps) {
       }
     }
   }
-  TextStyle hint{0.15f * h, rgb(0xB8C2D6), rgb(0x9AA6BE), rgb(0x05070C), 0.012f * h, rgb(0x000000, 0.0f), 0.0f, 0.0f};
-  draw_text(cv, "RIGHT STICK  <  >", 0.5f * w, 0.84f * h, hint);
+  // Voice chat: on (green), off (grey), or on without the microphone allowed (amber).
+  const char* v = voice == 1 ? "VOICE CHAT: ON" : (voice == 2 ? "VOICE CHAT: ON, NO MIC ACCESS" : "VOICE CHAT: OFF");
+  const uint32_t vTop = voice == 1 ? 0x9CFF8A : (voice == 2 ? 0xFFD27A : 0xB8C2D6);
+  const uint32_t vBottom = voice == 1 ? 0x3CC23C : (voice == 2 ? 0xFF9800 : 0x9AA6BE);
+  draw_text(cv, v, 0.5f * w, 0.99f * u, line_style(fitted(v, 0.18f * u), row == 1, vTop, vBottom));
+  // Your eye height in the life-size stadium (r44g).
+  char hl[64];
+  if (heightCm == 0) {
+    std::snprintf(hl, sizeof(hl), "STADIUM HEIGHT: NORMAL");
+  } else {
+    std::snprintf(hl, sizeof(hl), "STADIUM HEIGHT: YOU %d CM %s", heightCm > 0 ? heightCm : -heightCm,
+                  heightCm > 0 ? "HIGHER" : "LOWER");
+  }
+  draw_text(cv, hl, 0.5f * w, 1.41f * u, line_style(fitted(hl, 0.18f * u), row == 2, 0xFFFFFF, 0xDDE4F0));
+  const char* hint = "RIGHT STICK:  UP / DOWN PICKS,  LEFT / RIGHT CHANGES";
+  TextStyle hs{fitted(hint, 0.12f * u), rgb(0xB8C2D6), rgb(0x9AA6BE), rgb(0x05070C), 0.012f * u, rgb(0x000000, 0.0f),
+               0.0f, 0.0f};
+  draw_text(cv, hint, 0.5f * w, 0.5f * (1.60f * u + h - 8.0f), hs);
   cv.write(rgba);
 }
 
