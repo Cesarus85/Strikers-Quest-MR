@@ -58,6 +58,8 @@ And around the game:
   goals.
 - **Online 1v1**: **Quick match** pairs you with anyone else searching, or one player hosts and reads
   out a four-letter code and the other types it in. Each player keeps their own view mode.
+- **Tournaments** (alpha 1.5): 4- or 8-player knockouts with your own team name and star player as
+  your logo, a playoff tree, and results that report themselves. They start when they're full.
 - **Voice chat** in online matches (alpha 1.4): turn it on with **Voice chat** on the app's first
   screen, or in the game's pause settings.
 - **Pause settings**: crowd volume, voice chat, and your eye height in the stadium (for playing seated,
@@ -172,7 +174,8 @@ So there are four views, and you can mix them any way you like:
 The same grips work on the big screen: hold the **left grip** to move it, hold **both grips** and
 pull apart or twist to resize and turn it. Where you put it is remembered.
 
-A Bluetooth gamepad paired to the headset also works for offline play.
+A Bluetooth gamepad paired to the headset also works for offline play (it may show up as Player 3;
+in Tabletop the arrow over your player follows it).
 
 ## Play online with a friend
 
@@ -193,6 +196,24 @@ you: **Grudge Match**, pick your team, start.
 time, allow the microphone). In an online match you hear each other; it's off until you turn it on,
 and you can turn it off again in the game's pause settings (right stick down to **Voice chat**, then
 left). If only one of you has it on, neither hears the other.
+
+## Tournaments
+
+Alpha 1.5. Knockout tournaments for 4 or 8 players, on the same release and Version as you.
+
+1. Press **Tournaments** on the app's first screen.
+2. Type your **team name** and tap a **star player**: it's your team's logo in the lists and the tree.
+3. Tap the **4-player** or **8-player tournament**. The page shows how full each one is and who's in.
+   It starts by itself as soon as it's full, so stay on this page.
+4. Your match counts down from 10 and starts (or press **Play your match**). It's a normal Grudge
+   Match: both of you pick your team and start.
+5. When the match ends you come back to the **playoff tree**. The result reports itself; the
+   winner goes through to the next round, until there's a champion.
+
+- A draw, or two headsets that report different results, means the match is played again.
+- Leaving the tournament mid-match counts as a loss. If your opponent never turns up, after 5
+  minutes you can claim the win.
+- A tournament nobody plays on for an hour is dropped.
 
 ## If something goes wrong
 
@@ -334,8 +355,8 @@ Notes:
 ## The room server
 
 Online play goes through a tiny relay: a Cloudflare Worker with one Durable Object per room code,
-which passes each message to everyone in the room, and one more per Version and release that pairs
-up Quick match players. Its source is in [`server/`](server/), with
+which passes each message to everyone in the room, one more per Version and release that pairs up
+Quick match players, and one per Version and release that runs the tournaments. Its source is in [`server/`](server/), with
 instructions to run your own copy on Cloudflare's free plan and point the game at it (one line,
 `kServerHost` in `smstrikers-port/src/platform/xr_net.cpp`). Both players need builds that point at
 the same server.

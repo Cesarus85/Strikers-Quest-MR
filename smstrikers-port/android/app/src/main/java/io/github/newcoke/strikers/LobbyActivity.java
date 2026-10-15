@@ -63,6 +63,25 @@ public class LobbyActivity extends Activity {
     private int quickToken;          // r44: the search running (a newer one, or Cancel, ends it)
     private boolean searching;       // r44: the quick match page is up
 
+    // strikers-quest r45: tournaments. The game is started for a tournament match with its match id
+    // (StrikersActivity -> the network layer, which writes the result when the match ends), and comes
+    // back here with EXTRA_SHOW = SHOW_TOURNEY to report it.
+    static final String EXTRA_TOURNEY = "tourney";
+    static final String EXTRA_SHOW = "show";
+    static final String SHOW_TOURNEY = "tourney";
+    static final String TOURNEY_RESULT = "tourney-result.txt";
+    private static final String TEAM_NAME = "teamName";
+    private static final String TEAM_STAR = "teamStar";
+    private static final String PLAYER_ID = "playerId";
+    private TourneyClient tourney;        // the hub's connection while the Tournaments page is up
+    private org.json.JSONObject tourneyState;
+    private LinearLayout tourneyBody;     // the part of the page each state redraws
+    private TextView tourneyLink;
+    private EditText tourneyNameField;    // r45b: the team name box, read when a tournament is tapped
+    private String autoStartedMid = "";   // the match the countdown already ran for
+    private int countdownToken;
+    private boolean wasOnTourneys;        // the page was up when the panel went out of sight
+
     static final String EXTRA_ROOM = "room";
     // strikers-quest r43: the Version the panel shows (StrikersHome.CLASSIC / PLUS), so a game already
     // running on the other one can tell (StrikersActivity.onNewIntent).
@@ -105,11 +124,16 @@ public class LobbyActivity extends Activity {
         scroll.addView(page, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         setContentView(scroll);
-        showHome();
+        if (SHOW_TOURNEY.equals(getIntent().getStringExtra(EXTRA_SHOW))) {
+            showTourneys();  // r45: back from a tournament match
+        } else {
+            showHome();
+        }
         checkForUpdate();
     }
 
     private void showHome() {
+        leaveTourneyPage();
         page.removeAllViews();
         onHome = true;
         title("Quest 3 Strikers", 30);
@@ -122,6 +146,7 @@ public class LobbyActivity extends Activity {
         note("Quest alpha. Online: both players pick Grudge Match in the same room, on the same Version.");
         page.addView(button("Play offline", true, v -> start("")));
         page.addView(button("Quick match", true, v -> showQuick()));  // r44
+        page.addView(button("Tournaments", true, v -> showTourneys()));  // r45
         // r44d (Lance: "make sure everyones codes randomize"): a fresh code every time, not the last one.
         page.addView(button("Host an online match", false, v -> showHost(newCode())));
         page.addView(button("Join with a code", false, v -> showJoin()));
@@ -190,6 +215,10 @@ public class LobbyActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (intent != null && SHOW_TOURNEY.equals(intent.getStringExtra(EXTRA_SHOW))) {
+            showTourneys();  // r45: back from a tournament match
+            return;
+        }
         if (intent == null || !Updater.ACTION_INSTALL_STATUS.equals(intent.getAction())) return;
         int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
@@ -296,6 +325,7 @@ public class LobbyActivity extends Activity {
      * starts (StrikersHome.prepare -> STRIKERS_EDITION, src/platform/edition.cpp).
      */
     private void showVersions() {
+        leaveTourneyPage();  // r45
         page.removeAllViews();
         onHome = false;
         title("Choose your version", 24);
@@ -389,6 +419,7 @@ public class LobbyActivity extends Activity {
                     + " game file, then come back here and press the same button again.");
             return;
         }
+        leaveTourneyPage();  // r45
         page.removeAllViews();
         onHome = false;
         title("Choose your game file", 24);
@@ -428,6 +459,7 @@ public class LobbyActivity extends Activity {
     }
 
     private void showHost(String code) {
+        leaveTourneyPage();  // r45
         page.removeAllViews();
         onHome = false;
         title("Your room code", 24);
@@ -446,6 +478,7 @@ public class LobbyActivity extends Activity {
     }
 
     private void showJoin() {
+        leaveTourneyPage();  // r45
         page.removeAllViews();
         onHome = false;
         title("Join a room", 24);
@@ -492,6 +525,7 @@ public class LobbyActivity extends Activity {
      */
     private void showQuick() {
         if (!readyToStart(null)) return;  // the game file first: no use matching a game that can't start
+        leaveTourneyPage();  // r45
         page.removeAllViews();
         onHome = false;
         searching = true;
@@ -635,6 +669,430 @@ public class LobbyActivity extends Activity {
         }
     }
 
+    // --- strikers-quest r45: Tournaments (Lance: "people can name their teams ... and can join a
+    // tournament, in which will only start when enough people join, but you can see how full tourneys
+    // are or empty they are from that same menu ... 4 people tournaments and 8 people tournaments").
+    // The hub (server/, Tourneys) keeps the lobbies and the brackets; this page shows them, joins and
+    // leaves, starts this player's matches (a room code each, like Join) and reports their results.
+
+    /** This headset's player id for the hub: 16 hex digits, made once and kept. */
+    private String playerId() {
+        String id = prefs.getString(PLAYER_ID, "");
+        if (id.length() != 16) {
+            StringBuilder sb = new StringBuilder();
+            SecureRandom r = new SecureRandom();
+            for (int i = 0; i < 16; i++) sb.append("0123456789abcdef".charAt(r.nextInt(16)));
+            id = sb.toString();
+            prefs.edit().putString(PLAYER_ID, id).apply();
+        }
+        return id;
+    }
+
+    private String teamName() {
+        return prefs.getString(TEAM_NAME, "");
+    }
+
+    /** r45: the team's star player, its logo on the bracket (StarLogo), -1 none. */
+    private int teamStar() {
+        return prefs.getInt(TEAM_STAR, -1);
+    }
+
+    /** r45: the row of star players under the team name; the picked one is ringed in gold. */
+    private void addStarPicker(final EditText name) {
+        final TextView label = note("Your star player (your team's logo): " + StarLogo.name(teamStar()));
+        label.setPadding(0, dp(8), 0, dp(2));
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        final android.widget.ImageView[] icons = new android.widget.ImageView[StarLogo.COUNT];
+        final Runnable ring = () -> {
+            for (int i = 0; i < icons.length; i++) {
+                GradientDrawable bg = new GradientDrawable();
+                bg.setShape(GradientDrawable.OVAL);
+                bg.setColor(Color.TRANSPARENT);
+                if (i == teamStar()) bg.setStroke(dp(3), ACCENT);
+                icons[i].setBackground(bg);
+            }
+            label.setText("Your star player (your team's logo): " + StarLogo.name(teamStar()));
+        };
+        for (int i = 0; i < StarLogo.COUNT; i++) {
+            final int star = i;
+            android.widget.ImageView icon = new android.widget.ImageView(this);
+            icon.setImageDrawable(new StarLogo(star));
+            icon.setPadding(dp(5), dp(5), dp(5), dp(5));
+            icon.setContentDescription(StarLogo.name(star));
+            icon.setOnClickListener(v -> {
+                prefs.edit().putInt(TEAM_STAR, star).apply();
+                ring.run();
+                if (tourney != null) tourney.identity(name.getText().toString().trim(), star);
+            });
+            icons[i] = icon;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(54), dp(54));
+            lp.setMargins(dp(3), 0, dp(3), 0);
+            row.addView(icon, lp);
+        }
+        ring.run();
+        page.addView(row, wrap());
+    }
+
+    /** r45: who has joined a lobby: their logos and names, four to a line. */
+    private void addTeamChips(LinearLayout parent, org.json.JSONArray names, org.json.JSONArray stars) {
+        if (names == null || names.length() == 0) return;
+        LinearLayout line = null;
+        for (int i = 0; i < names.length(); i++) {
+            if (i % 4 == 0) {
+                line = new LinearLayout(this);
+                line.setOrientation(LinearLayout.HORIZONTAL);
+                line.setGravity(Gravity.CENTER);
+                parent.addView(line, wrap());
+            }
+            LinearLayout chip = new LinearLayout(this);
+            chip.setOrientation(LinearLayout.HORIZONTAL);
+            chip.setGravity(Gravity.CENTER_VERTICAL);
+            chip.setPadding(dp(6), dp(4), dp(10), dp(4));
+            android.widget.ImageView logo = new android.widget.ImageView(this);
+            logo.setImageDrawable(new StarLogo(stars != null ? stars.optInt(i, -1) : -1));
+            chip.addView(logo, new LinearLayout.LayoutParams(dp(26), dp(26)));
+            TextView n = new TextView(this);
+            n.setText(names.optString(i));
+            n.setTextColor(Color.WHITE);
+            n.setTextSize(14);
+            n.setPadding(dp(5), 0, 0, 0);
+            chip.addView(n, wrap());
+            line.addView(chip, wrap());
+        }
+    }
+
+    private void showTourneys() {
+        leaveTourneyPage();
+        page.removeAllViews();
+        onHome = false;
+        searching = false;
+        ++quickToken;
+        title("Tournaments", 26);
+        note("4 or 8 players, knockout. It starts when it's full; each match is a Grudge Match, and you"
+                + " come back here between rounds.");
+        // The team name, kept as typed; the hub tidies it.
+        TextView label = note("Your team name");
+        label.setPadding(0, dp(4), 0, dp(2));
+        final EditText name = new EditText(this);
+        name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        name.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
+        name.setTextSize(24);
+        name.setTextColor(Color.WHITE);
+        name.setHintTextColor(Color.GRAY);
+        name.setHint("Team name");
+        name.setGravity(Gravity.CENTER);
+        name.setSingleLine(true);
+        name.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        name.setText(teamName());
+        final Runnable saveName = () -> {
+            String n = name.getText().toString().trim();
+            if (n.equals(teamName())) return;
+            prefs.edit().putString(TEAM_NAME, n).apply();
+            if (tourney != null) tourney.identity(n, teamStar());
+        };
+        name.setOnEditorActionListener((v, actionId, event) -> {
+            saveName.run();
+            return false;
+        });
+        name.setOnFocusChangeListener((v, focused) -> {
+            if (!focused) saveName.run();
+        });
+        // r45b (Lance: tapping the 3/4 tournament did nothing): saved as it is typed, not only on Done,
+        // so a tap on a tournament right after typing has the name.
+        name.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(android.text.Editable s) {
+                prefs.edit().putString(TEAM_NAME, s.toString().trim()).apply();
+            }
+        });
+        tourneyNameField = name;
+        page.addView(name, new LinearLayout.LayoutParams(dp(360), ViewGroup.LayoutParams.WRAP_CONTENT));
+        addStarPicker(name);
+        tourneyLink = note("Connecting...");
+        tourneyLink.setTextSize(14);
+        tourneyLink.setTextColor(MUTED);
+        tourneyBody = new LinearLayout(this);
+        tourneyBody.setOrientation(LinearLayout.VERTICAL);
+        tourneyBody.setGravity(Gravity.CENTER_HORIZONTAL);
+        page.addView(tourneyBody, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        page.addView(button("Back", false, v -> showHome()));
+        final String key = (StrikersHome.CLASSIC.equals(StrikersHome.edition(this)) ? "C" : "P") + ONLINE_PROTOCOL;
+        tourney = new TourneyClient(SERVER_HOST, key, playerId(), teamName(), teamStar(), new TourneyClient.Listener() {
+            @Override public void onState(org.json.JSONObject state) {
+                tourneyState = state;
+                if (tourneyLink != null && tourneyLink.getCurrentTextColor() != WARN) tourneyLink.setText("");
+                renderTourney();
+            }
+
+            @Override public void onLink(boolean connected, String why) {
+                if (tourneyLink != null) {
+                    tourneyLink.setText(why != null ? why : "");
+                    tourneyLink.setTextColor(connected && why != null ? WARN : MUTED);
+                }
+                if (connected && why == null) sendPendingResult();
+            }
+        });
+        tourney.start();
+    }
+
+    /** Off the Tournaments page: the hub's connection closes (a filling lobby lets go after 90 s). */
+    private void leaveTourneyPage() {
+        ++countdownToken;
+        if (tourney != null) {
+            tourney.stop();
+            tourney = null;
+        }
+        tourneyBody = null;
+        tourneyLink = null;
+    }
+
+    /** The result the game wrote after a tournament match, sent once the hub is there. */
+    private void sendPendingResult() {
+        final File f = new File(StrikersHome.homeDir(this), TOURNEY_RESULT);
+        if (!f.isFile() || tourney == null) return;
+        String mid = "", how = "played", code = "";
+        int my = -1, their = -1;
+        for (String line : readText(f, 400).split("\n")) {
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            String k = line.substring(0, eq).trim(), v = line.substring(eq + 1).trim();
+            try {
+                if (k.equals("mid")) mid = v;
+                else if (k.equals("code")) code = v;
+                else if (k.equals("my")) my = Integer.parseInt(v);
+                else if (k.equals("their")) their = Integer.parseInt(v);
+                else if (k.equals("how")) how = v;
+            } catch (NumberFormatException e) {
+                // a broken line: the report is left out
+            }
+        }
+        // r45d: never counted down into again: the hub may still show this match ready for a moment,
+        // and r45c started the just-played final over (the bot then quit at its 15 minutes).
+        autoStartedMid = mid + "/" + code;
+        if (mid.isEmpty() || my < 0 || their < 0) {
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+            return;
+        }
+        try {
+            org.json.JSONObject m = new org.json.JSONObject();
+            m.put("t", "result");
+            m.put("mid", mid);
+            m.put("my", my);
+            m.put("their", their);
+            m.put("how", "left".equals(how) ? "left" : "played");
+            if (!code.isEmpty()) m.put("code", code);  // a report for a replayed match is refused
+            if (tourney.send(m)) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+                android.util.Log.i("strikers", "tournament result sent: " + mid + " " + my + "-" + their + " " + how);
+            }
+        } catch (org.json.JSONException e) {
+            // cannot happen with these values
+        }
+    }
+
+    private void tourneyRequest(String type, String field, Object value) {
+        if (tourney == null) return;
+        try {
+            org.json.JSONObject m = new org.json.JSONObject();
+            m.put("t", type);
+            if (field != null) m.put(field, value);
+            if (!tourney.send(m) && tourneyLink != null) tourneyLink.setText("Not connected yet, try again in a moment.");
+        } catch (org.json.JSONException e) {
+            // cannot happen with these values
+        }
+    }
+
+    /** "Final", "Semi-finals", "Quarter-finals", from the end. */
+    private static String roundName(int round, int rounds) {
+        final int fromEnd = rounds - 1 - round;
+        return fromEnd == 0 ? "Final" : fromEnd == 1 ? "Semi-finals" : fromEnd == 2 ? "Quarter-finals"
+                : "Round " + (round + 1);
+    }
+
+    private void renderTourney() {
+        if (tourneyBody == null || tourneyState == null) return;
+        tourneyBody.removeAllViews();
+        final org.json.JSONObject t = tourneyState.optJSONObject("tourney");
+        if (t == null) {
+            renderLobbies();
+        } else {
+            renderBracket(t, tourneyState.optInt("you", -1));
+        }
+    }
+
+    private void renderLobbies() {
+        final org.json.JSONObject lobbies = tourneyState.optJSONObject("lobbies");
+        final org.json.JSONObject me = tourneyState.optJSONObject("me");
+        final int myLobby = me != null && !me.isNull("lobby") ? me.optInt("lobby", 0) : 0;
+        if (teamName().isEmpty()) bodyNote("Pick a team name first (it shows in the lists and the bracket).", WARN);
+        for (int size : new int[] {4, 8}) {
+            final org.json.JSONObject l = lobbies != null ? lobbies.optJSONObject(String.valueOf(size)) : null;
+            final org.json.JSONArray names = l != null ? l.optJSONArray("names") : null;
+            final int count = names != null ? names.length() : 0;
+            final String head = size + "-player tournament   " + count + "/" + size + " joined";
+            final String sub = count == 0 ? "Nobody yet: be the first." : "Tap to join";
+            final boolean in = myLobby == size;
+            Button b = rowIn(tourneyBody, head + "\n" + (in ? "" : sub) + (in ? "You're in! Waiting for " + (size - count)
+                    + " more..." : ""), true, v -> {
+                if (in) return;
+                if (teamName().isEmpty()) {
+                    // r45b: said where it is seen (under the name), and the name box takes the typing.
+                    if (tourneyLink != null) {
+                        tourneyLink.setText("Type your team name above first, then tap the tournament again.");
+                        tourneyLink.setTextColor(WARN);
+                    }
+                    if (tourneyNameField != null) tourneyNameField.requestFocus();
+                    return;
+                }
+                if (tourney != null) tourney.identity(teamName(), teamStar());  // the name as typed
+                tourneyRequest("join", "size", size);
+                if (tourneyLink != null) {
+                    tourneyLink.setText("Joining the " + size + "-player tournament...");
+                    tourneyLink.setTextColor(MUTED);
+                }
+            });
+            SpannableString text = new SpannableString(b.getText());
+            text.setSpan(new RelativeSizeSpan(1.3f), 0, head.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            text.setSpan(new StyleSpan(Typeface.BOLD), 0, head.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            b.setText(text);
+            addTeamChips(tourneyBody, names, l != null ? l.optJSONArray("stars") : null);  // who's in
+            if (in) {
+                Button leave = button("Leave the " + size + "-player tournament", false, v -> tourneyRequest("leave", null, null));
+                tourneyBody.addView(leave);
+            }
+        }
+        if (myLobby == 0) bodyNote("Tap one to join. It starts by itself when it's full.", MUTED);
+        else bodyNote("Stay on this page: when it fills up, your first match starts from here.", MUTED);
+    }
+
+    private void renderBracket(org.json.JSONObject t, int you) {
+        final org.json.JSONArray names = t.optJSONArray("names");
+        final org.json.JSONArray rounds = t.optJSONArray("rounds");
+        if (names == null || rounds == null) return;
+        final int size = t.optInt("size", names.length());
+        final int champion = t.isNull("champion") ? -1 : t.optInt("champion", -1);
+        java.util.function.IntFunction<String> nameOf = i -> i >= 0 && i < names.length() ? names.optString(i) : "?";
+        if (champion >= 0) {
+            TextView c = bodyNote((champion == you ? "YOU WON THE TOURNAMENT!\n" : "Champions: ")
+                    + nameOf.apply(champion), ACCENT);
+            c.setTextSize(26);
+            c.setTypeface(Typeface.DEFAULT_BOLD);
+        }
+        // This player's match: the ready one, or how the last one went.
+        org.json.JSONObject mine = null, last = null;
+        int mineRound = -1;
+        for (int r = 0; r < rounds.length(); r++) {
+            org.json.JSONArray ms = rounds.optJSONArray(r);
+            for (int i = 0; ms != null && i < ms.length(); i++) {
+                org.json.JSONObject m = ms.optJSONObject(i);
+                if (m == null) continue;
+                final boolean meIn = (!m.isNull("a") && m.optInt("a") == you) || (!m.isNull("b") && m.optInt("b") == you);
+                if (!meIn) continue;
+                if ("ready".equals(m.optString("status"))) {
+                    mine = m;
+                    mineRound = r;
+                } else if ("done".equals(m.optString("status"))) {
+                    last = m;
+                }
+            }
+        }
+        if (mine == null) ++countdownToken;  // r45d: no match of yours is ready: no countdown either
+        if (mine != null) {
+            final org.json.JSONObject m = mine;
+            final boolean amA = m.optInt("a") == you;
+            final int opp = amA ? (m.isNull("b") ? -1 : m.optInt("b")) : m.optInt("a");
+            final String mid = m.optString("mid"), code = m.optString("code");
+            final org.json.JSONObject reports = m.optJSONObject("reports");
+            final boolean reported = reports != null && !reports.isNull(amA ? "a" : "b");
+            final String what = roundName(mineRound, rounds.length()) + ": you vs " + nameOf.apply(opp)
+                    + (m.optInt("replays", 0) > 0 ? " (replay)" : "");
+            TextView h = bodyNote(what, ACCENT);
+            h.setTextSize(22);
+            if (reported) {
+                ++countdownToken;  // r45d: a countdown still running for it stops
+                bodyNote("Your result is in. Waiting for " + nameOf.apply(opp) + "'s.", MUTED);
+            } else {
+                tourneyBody.addView(button("Play your match", true, v -> {
+                    ++countdownToken;
+                    start(code, mid);
+                }));
+                bodyNote("Then both of you: Grudge Match, pick your team, start.", MUTED);
+                // A short countdown the first time this match shows up, so a match starts without a
+                // tap, but a player who just came back can still wait.
+                if (!(mid + "/" + code).equals(autoStartedMid)) {  // r45d: a replay (new code) counts down again
+                    autoStartedMid = mid + "/" + code;
+                    final TextView count = bodyNote("Starting in 10...", Color.WHITE);
+                    final int token = ++countdownToken;
+                    for (int s = 9; s >= 0; s--) {
+                        final int left = s;
+                        page.postDelayed(() -> {
+                            if (token != countdownToken || tourneyBody == null) return;
+                            if (left > 0) {
+                                count.setText("Starting in " + left + "...");
+                            } else {
+                                start(code, mid);
+                            }
+                        }, (10 - s) * 1000L);
+                    }
+                    tourneyBody.addView(button("Wait", false, v -> {
+                        ++countdownToken;
+                        count.setText("Press Play your match when you're ready.");
+                    }));
+                }
+                final long readyAt = m.optLong("readyAt", 0);
+                if (readyAt > 0 && System.currentTimeMillis() - readyAt > 5 * 60 * 1000L) {
+                    tourneyBody.addView(button("Opponent never came? Claim the win", false,
+                            v -> tourneyRequest("noshow", "mid", mid)));
+                }
+            }
+        } else if (champion < 0 && last != null) {
+            ++countdownToken;  // r45d: nothing to count down to
+            final boolean won = !last.isNull("winner") && last.optInt("winner") == you;
+            bodyNote(won ? "You won! Waiting for your next opponent..." : "You're out. Thanks for playing!",
+                    won ? ACCENT : MUTED);
+        }
+        // The whole tree (Lance: "a playoff tree ... with the star player ... being the logo and the team
+        // name being shown on the bracket"), scrolling sideways when it is wider than the panel.
+        android.widget.HorizontalScrollView sideways = new android.widget.HorizontalScrollView(this);
+        sideways.setHorizontalScrollBarEnabled(true);
+        BracketView tree = new BracketView(this);
+        tree.set(t, you);
+        sideways.addView(tree);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(10);
+        tourneyBody.addView(sideways, lp);
+        bodyNote(size + "-player tournament", MUTED);
+    }
+
+    private TextView bodyNote(String text, int colour) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextColor(colour);
+        t.setTextSize(17);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, dp(6), 0, dp(6));
+        tourneyBody.addView(t, wrap());
+        return t;
+    }
+
+    /** row(), but into `parent`; onClick null = shown, not pressable. */
+    private Button rowIn(LinearLayout parent, String text, boolean highlight, View.OnClickListener onClick) {
+        Button b = row(text, highlight, onClick);
+        if (onClick == null) {
+            b.setEnabled(false);
+            b.setTextColor(highlight ? Color.WHITE : Color.rgb(200, 208, 220));
+        }
+        parent.addView(b);
+        return b;
+    }
+
     /** strikers-quest r44: the panel goes out of sight (headset off, Quest menu): stop searching. */
     @Override
     protected void onStop() {
@@ -643,6 +1101,23 @@ public class LobbyActivity extends Activity {
             ++quickToken;
             searching = false;
             showHome();
+        }
+        // r45: out of sight on the Tournaments page: the hub's connection goes (a filling lobby lets
+        // this player go after 90 s), and comes back with the page.
+        if (tourney != null) {
+            ++countdownToken;
+            tourney.stop();
+            tourney = null;
+            wasOnTourneys = true;
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (wasOnTourneys) {
+            wasOnTourneys = false;
+            showTourneys();
         }
     }
 
@@ -675,11 +1150,18 @@ public class LobbyActivity extends Activity {
     }
 
     private void start(String code) {
-        if (!code.isEmpty()) prefs.edit().putString(LAST_CODE, code).apply();
+        start(code, "");
+    }
+
+    /** r45: `tourneyMid`, a tournament match's id ("" for none): the game reports how it ends. */
+    private void start(String code, String tourneyMid) {
+        if (!code.isEmpty() && tourneyMid.isEmpty()) prefs.edit().putString(LAST_CODE, code).apply();
         if (!readyToStart(code)) return;
         Intent game = new Intent(this, StrikersActivity.class);
         game.putExtra(EXTRA_ROOM, code);
         game.putExtra(EXTRA_EDITION, StrikersHome.edition(this));  // strikers-quest r43
+        game.putExtra(EXTRA_TOURNEY, tourneyMid);  // r45
+        leaveTourneyPage();
         startActivity(game);
         finish();
     }

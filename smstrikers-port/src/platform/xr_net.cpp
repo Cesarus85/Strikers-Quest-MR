@@ -170,6 +170,9 @@ struct Shared {
   // connection follows (under m). `room` is only the pick, so a pick mid-match no longer cuts it.
   std::string activeRoom;
   bool roomSet = false;                  // room came from nativeSetRoom (under m)
+  // strikers-quest r45: the tournament match this room is for (the panel's match id), "" = none
+  // (under m): its result is written for the panel when the match ends.
+  std::string tourney;
   std::atomic<bool> connected{false};
   std::atomic<bool> running{false};
 };
@@ -424,8 +427,32 @@ struct State {
   uint32_t desyncs = 0, checks = 0;
   int frontEndFrames = 0;
   uint32_t stalls = 0;
+  // strikers-quest r45: a tournament match: its id (taken when the match goes online) and the last
+  // score Game.cpp reported (home, away).
+  std::string tourneyMid;
+  int score[2] = {0, 0};
+  bool scoreSeen = false;
 };
 State st;
+
+// strikers-quest r45: a tournament match's result is waiting in tourney-result.txt (StrikersActivity
+// takes the flag and brings the launcher panel up, which reports it).
+std::atomic<bool> g_tourneyPending{false};
+
+void tourney_result(const char* how) {
+  const int mine = st.isHost ? 0 : 1;  // home = the host
+  const char* home = std::getenv("STRIKERS_HOME");
+  const std::string path =
+      std::string(home != nullptr && *home != '\0' ? home : "/storage/emulated/0/Strikers") + "/tourney-result.txt";
+  if (FILE* f = std::fopen(path.c_str(), "w")) {
+    // The room code too: the hub refuses a report for a match it has replayed under a new code since.
+    std::fprintf(f, "mid=%s\ncode=%s\nmy=%d\ntheir=%d\nhow=%s\n", st.tourneyMid.c_str(), st.room.c_str(),
+                 st.score[mine], st.score[1 - mine], how);
+    std::fclose(f);
+  }
+  NLOG("net: tournament match %s over: %d-%d (%s)", st.tourneyMid.c_str(), st.score[mine], st.score[1 - mine], how);
+  g_tourneyPending = true;
+}
 
 void send(std::vector<uint8_t> msg) {
   std::lock_guard<std::mutex> lock(sh.m);
@@ -511,6 +538,12 @@ void end_online(const char* why) {
   if (!st.online && !st.startPending) return;
   NLOG("net: online match over (%s) after %u frames, %u/%u state checks differed, %u stalls", why, st.frame,
        st.desyncs, st.checks, st.stalls);
+  // r45: a tournament match that really ran (10 s or more) reports how it ended: played to the end
+  // (back in the menus, both headsets on the same frame) or the friend dropped out.
+  if (!st.tourneyMid.empty() && st.online && st.frame > 600 && st.scoreSeen) {
+    tourney_result(std::strcmp(why, "back in the menus") == 0 ? "played" : "left");
+  }
+  st.tourneyMid.clear();
   st.online = false;
   st.startPending = false;
   st.stepped = false;
@@ -754,6 +787,13 @@ void begin_online() {
   PortNetSetFixedStep(1);
   NLOG("net: online, frame 0");
   xrvoice::match_begin();  // r44
+  {
+    std::lock_guard<std::mutex> lock(sh.m);
+    st.tourneyMid = sh.tourney;  // r45
+  }
+  st.score[0] = st.score[1] = 0;
+  st.scoreSeen = false;
+  if (!st.tourneyMid.empty()) NLOG("net: tournament match %s", st.tourneyMid.c_str());
 }
 
 }  // namespace
@@ -765,6 +805,8 @@ void poll() {
     std::lock_guard<std::mutex> lock(sh.m);
     if (!sh.roomSet) {
       sh.room = sanitize_room(std::getenv("STRIKERS_ROOM"));
+      const char* tourney = std::getenv("STRIKERS_TOURNEY");  // r45
+      sh.tourney = tourney != nullptr ? tourney : "";
       sh.roomSet = true;
     }
     room = sh.room;
@@ -1054,6 +1096,39 @@ extern "C" int PortNetLocalPad(void) { return xrnet::local_pad(); }
 
 extern "C" int PortNetOnline(void) { return st.online ? 1 : 0; }
 
+extern "C" void PortNetNoteScore(int home, int away) {
+  if (!st.online) return;
+  st.score[0] = home;
+  st.score[1] = away;
+  st.scoreSeen = true;
+}
+
+// strikers-quest r45: the tournament match the panel's room is for ("" for none), with the room
+// (StrikersActivity, before nativeSetRoom); taken when the next online match starts.
+extern "C" JNIEXPORT void JNICALL Java_io_github_newcoke_strikers_StrikersActivity_nativeSetTourney(JNIEnv* env, jclass,
+                                                                                                  jstring jmid) {
+  const char* s = jmid != nullptr ? env->GetStringUTFChars(jmid, nullptr) : nullptr;
+  std::string mid;
+  for (const char* c = s; c != nullptr && *c != '\0' && mid.size() < 40; ++c) {
+    // r45d: '.' too: the hub's match ids are <tid>.<round>.<index>. r45c dropped the dots, so the
+    // final's result (the first match started through here, not the environment) named no match.
+    if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '-' || *c == '_' ||
+        *c == '.') {
+      mid.push_back(*c);
+    }
+  }
+  if (s != nullptr) env->ReleaseStringUTFChars(jmid, s);
+  std::lock_guard<std::mutex> lock(xrnet::sh.m);
+  xrnet::sh.tourney = mid;
+}
+
+// strikers-quest r45: StrikersActivity, once a second: true once after a tournament match ended and
+// its result was written (tourney-result.txt), so the panel comes up to report it.
+extern "C" JNIEXPORT jboolean JNICALL Java_io_github_newcoke_strikers_StrikersActivity_nativeTakeTourneyResult(JNIEnv*,
+                                                                                                            jclass) {
+  return xrnet::g_tourneyPending.exchange(false) ? JNI_TRUE : JNI_FALSE;
+}
+
 // r39: the room code from the launcher panel when the game was already running (StrikersActivity
 // .onNewIntent). Takes effect between matches; "" is offline. r39b: only the pick is set here; poll()
 // moves the game and the connection to it (sh.activeRoom) once no match needs the old room.
@@ -1093,5 +1168,6 @@ extern "C" void PortNetCommitFrame(void) {}
 extern "C" void PortNetFrameEnd(unsigned int, int) {}
 extern "C" int PortNetLocalPad(void) { return 0; }
 extern "C" int PortNetOnline(void) { return 0; }
+extern "C" void PortNetNoteScore(int, int) {}
 
 #endif

@@ -605,12 +605,38 @@ extern "C" void PortCelebrationPoll(void)
     PortXrSetGameplayLive(taskState == 2 && g_pGame != NULL ? 1 : 0);
     PortXrSetPaused(Audio::gbGameIsPaused ? 1 : 0); // r42: the crowd volume panel shows while paused
 
-    // The player you control (pad 0), for the Tabletop "that's you" marker. Only while the match is
-    // being played; cutscenes and replays hide it.
+    // The player you control, for the Tabletop "that's you" marker. Only while the match is being
+    // played; cutscenes and replays hide it.
+    // strikers-quest r45 (a player's bug report: with a Bluetooth controller, "recognized as Player 3
+    // ... I can't see the cursor above the characters"): offline the marker follows whichever pad
+    // controls a player, the Touch controllers' (pad 0) first; r24-r44 looked at pad 0 alone, and a
+    // Bluetooth pad is another port. Online it stays this headset's pad (the friend's is theirs).
     int markerShown = 0;
     float markerPos[3] = { 0.0f, 0.0f, 0.0f };
     int markerTeamCaptain = -1;
+    int markerPad = -1;
     if (taskState == 2 && g_pGame != NULL)
+    {
+        const bool online = PortNetOnline() != 0;
+        int best = 99;
+        for (int side = 0; side < 2; side++)
+        {
+            cTeam* team = g_pTeams[side];
+            if (team == NULL)
+                continue;
+            for (int i = 0; i < 5; i++)
+            {
+                cPlayer* player = team->m_pPlayers[i];
+                if (player == NULL)
+                    continue;
+                cGlobalPad* pad = player->GetGlobalPad();
+                if (pad != NULL && (online ? pad->m_padIndex == PortNetLocalPad() : pad->m_padIndex < best))
+                    best = pad->m_padIndex;
+            }
+        }
+        markerPad = best != 99 ? best : -1;
+    }
+    if (markerPad >= 0)
     {
         for (int side = 0; side < 2 && !markerShown; side++)
         {
@@ -623,7 +649,7 @@ extern "C" void PortCelebrationPoll(void)
                 if (player == NULL)
                     continue;
                 cGlobalPad* pad = player->GetGlobalPad();
-                if (pad == NULL || pad->m_padIndex != PortNetLocalPad())
+                if (pad == NULL || pad->m_padIndex != markerPad)
                     continue;
                 markerShown = 1;
                 // Self-test (xr_fx "item"): a green shell for this team, to try X with.
@@ -766,6 +792,9 @@ extern "C" void PortCelebrationPoll(void)
                 }
             }
         }
+        // strikers-quest r45: the score, for a tournament match's result (only while a match exists).
+        if (g_pGame != NULL && g_pBall != NULL && g_pTeams[0] != NULL && g_pTeams[1] != NULL)
+            PortNetNoteScore(g_pTeams[0]->m_nScore, g_pTeams[1]->m_nScore);
         PortNetFrameEnd(h, taskState == 4 ? 1 : 0);
     }
 }

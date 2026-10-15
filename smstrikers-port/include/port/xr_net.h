@@ -58,6 +58,10 @@ int PortNetLocalPad(void);
 /* 1 while an online match runs (fixed game time step, both pads from the network). */
 int PortNetOnline(void);
 
+/* strikers-quest r45: Game.cpp, every online frame while both teams exist: the score (home, away).
+ * A tournament match (the panel's match id, nativeSetTourney) reports it when the match ends. */
+void PortNetNoteScore(int home, int away);
+
 #ifdef __cplusplus
 }
 #endif

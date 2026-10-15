@@ -4243,6 +4243,9 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
       if (g.tableLift < 0.003f && target == 0.0f) g.tableLift = 0.0f;
     }
     scene.tablePos = table_shown_pos();
+    // r45d: your eyes under the field (raised for the scorer, or you crouched): its underside solid.
+    scene.tableUnderside = scene.tabletop && g.headValid && g.headPose.position.y < scene.tablePos.y - 0.02f;
+    if (scene.tableUnderside) ensure_fx();
     scene.tableYaw = g.table.yaw;
     scene.tableScale = g.table.scale;
     scene.charScale = PortXrCharacterScale();

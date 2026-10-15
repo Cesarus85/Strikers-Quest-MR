@@ -90,6 +90,15 @@ public class StrikersActivity extends SDLActivity {
         // env.txt set in prepare just above, or no room at all.
         final android.content.Intent start = getIntent();
         if (start != null && start.hasExtra(LobbyActivity.EXTRA_ROOM)) setRoomEnv(roomFrom(start));
+        // strikers-quest r45: a tournament match: its id, for the result the network layer writes.
+        if (start != null && start.hasExtra(LobbyActivity.EXTRA_TOURNEY)) {
+            try {
+                String mid = start.getStringExtra(LobbyActivity.EXTRA_TOURNEY);
+                android.system.Os.setenv("STRIKERS_TOURNEY", mid != null ? mid : "", true);
+            } catch (android.system.ErrnoException e) {
+                android.util.Log.e("strikers", "setenv STRIKERS_TOURNEY failed", e);
+            }
+        }
         super.onCreate(savedInstanceState);
 
         // Uma partida são minutos segurando o manche numa direção, o que nenhum
@@ -130,6 +139,33 @@ public class StrikersActivity extends SDLActivity {
     private static native boolean nativeTakeOnlineNote();
 
     private boolean onlineNoteHook = true;  // r43: false once this build turns out not to have it
+
+    /** strikers-quest r45: src/platform/xr_net.cpp; the tournament match the next room is for. */
+    private static native void nativeSetTourney(String mid);
+
+    /** strikers-quest r45: true once after a tournament match ended and tourney-result.txt was written. */
+    private static native boolean nativeTakeTourneyResult();
+
+    /**
+     * strikers-quest r45: a tournament match is over: the launcher panel comes up on its Tournaments
+     * page, which reports the result and shows the bracket. The game stays (paused behind it), so the
+     * next match starts without loading it again.
+     */
+    private boolean backToPanelForTourney() {
+        if (!onlineNoteHook) return false;
+        boolean done;
+        try {
+            done = nativeTakeTourneyResult();
+        } catch (UnsatisfiedLinkError e) {
+            return false;
+        }
+        if (!done) return false;
+        android.util.Log.i("strikers", "tournament match over, to the Tournaments page");
+        android.content.Intent panel = new android.content.Intent(this, LobbyActivity.class);
+        panel.putExtra(LobbyActivity.EXTRA_SHOW, LobbyActivity.SHOW_TOURNEY);
+        startActivity(panel);
+        return true;
+    }
 
     /**
      * strikers-quest r43: an online match refused: back to the launcher panel, which says why and has
@@ -187,6 +223,9 @@ public class StrikersActivity extends SDLActivity {
             // it right now, and setenv can move the whole table under it. nativeSetRoom alone is
             // enough: the network layer only reads STRIKERS_ROOM when nothing came through it.
             try {
+                // r45: the tournament match this room is for ("" for none), before the room itself.
+                final String mid = intent.getStringExtra(LobbyActivity.EXTRA_TOURNEY);
+                nativeSetTourney(mid != null ? mid : "");
                 nativeSetRoom(room);
             } catch (UnsatisfiedLinkError e) {
                 android.util.Log.w("strikers", "no native room switch in this build", e);
@@ -265,6 +304,7 @@ public class StrikersActivity extends SDLActivity {
         relogio.postDelayed(new Runnable() {
             @Override public void run() {
                 if (backToPanelForOnlineNote()) return;  // strikers-quest r43
+                backToPanelForTourney();                 // r45
                 if (overlay != null) {
                     final boolean mostrar = Toque.ligada();
                     final int quer = mostrar ? View.VISIBLE : View.GONE;

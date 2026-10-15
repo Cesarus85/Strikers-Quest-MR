@@ -1547,7 +1547,7 @@ bool update(const Scene& sc) {
   if (s.dropTarget == 0.0f && s.drop < 0.002f && std::fabs(s.dropVel) < 0.01f) s.drop = s.dropVel = 0.0f;
 
   if (s.stage == Stage::Idle && s.parts.empty() && s.hatsLeft == 0) {
-    return s.drop > 0.0f || marker_active(sc) || washing;
+    return s.drop > 0.0f || marker_active(sc) || washing || sc.tableUnderside;
   }
   const Scale k = scale_for(sc);
 
@@ -1636,13 +1636,14 @@ bool update(const Scene& sc) {
   }
 
   step_particles(sc, k, dt);
-  return !s.parts.empty() || s.stage != Stage::Idle || s.drop > 0.0f || marker_active(sc) || washing;
+  return !s.parts.empty() || s.stage != Stage::Idle || s.drop > 0.0f || marker_active(sc) || washing ||
+         sc.tableUnderside;
 }
 
 bool render(const Scene& sc, XrCompositionLayerProjection* layer) {
   const bool marker = marker_active(sc);
   const bool washing = wash_active();
-  if (!s.ready || (s.parts.empty() && !marker && !washing)) return false;
+  if (!s.ready || (s.parts.empty() && !marker && !washing && !sc.tableUnderside)) return false;
   Slot& slot = s.slots[s.slot];
   s.slot = (s.slot + 1) % kSlots;
   if (slot.pending) {
@@ -1667,7 +1668,7 @@ bool render(const Scene& sc, XrCompositionLayerProjection* layer) {
   uint32_t first[kQuadBucket + 1] = {}, filled[kQuadBucket + 1] = {};
   uint32_t count = 0;
   for (const Particle& q : s.parts) {
-    if (count >= kMaxParticles - 2) break;
+    if (count >= kMaxParticles - 3) break;  // r45d: three left: the marker, the flash, the underside
     ++filled[bucket_of(q)];
     ++count;
   }
@@ -1734,6 +1735,31 @@ bool render(const Scene& sc, XrCompositionLayerProjection* layer) {
     wash.params[0] = static_cast<float>(kWash);
     wash.params[1] = 1.0f;
     wash.params[2] = s.washAlpha;
+  }
+  // r45d (Lance: when the table rises over you, "make the bottom of the field solid so i dont see
+  // right through the field when its above me"): a solid dark card the size of the pitch, just under
+  // its ground (below the stand-in box's floor, so the box keeps hiding what falls on the field).
+  // Only while your eyes are below the field; from above the game's own field is what you see.
+  const uint32_t undersideAt = count + markerCount;
+  const bool underside = sc.tableUnderside && sc.tabletop;
+  if (underside) {
+    Instance& u = inst[undersideAt];
+    const XrVector3f c = game_to_room(sc.tableScale, sc.tableYaw, sc.tablePos, 0.0f, 0.0f, -0.3f);
+    u.posSize[0] = c.x;
+    u.posSize[1] = c.y;
+    u.posSize[2] = c.z;
+    u.posSize[3] = 27.0f * sc.tableScale;  // across the pitch (game y), with the fence
+    const float xAxis[3] = {1.0f, 0.0f, 0.0f}, yAxis[3] = {0.0f, 1.0f, 0.0f};
+    float flat[4], yaw[4];
+    quat_axis_angle(xAxis, 1.5707963f, flat);    // the card's face down
+    quat_axis_angle(yAxis, sc.tableYaw, yaw);    // its length along the pitch
+    quat_mul(yaw, flat, u.quat);
+    u.color1 = pack(0x22301F);
+    u.color2 = pack(0x22301F);
+    u.params[0] = static_cast<float>(kPaper);
+    u.params[1] = 45.0f / 27.0f;                 // along the pitch (game x)
+    u.params[2] = 1.0f;
+    u.params[3] = 0.0f;
   }
   uint32_t indices = 0;
   for (uint32_t b = 0; b < kQuadBucket; ++b) indices += filled[b] * s.meshRanges[b / mesh::kCount][b % mesh::kCount].indexCount;
@@ -1807,6 +1833,9 @@ bool render(const Scene& sc, XrCompositionLayerProjection* layer) {
     vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s.fxPipeline);
     vkCmdPushConstants(slot.cmd, s.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
     vkCmdBindVertexBuffers(slot.cmd, 0, 1, &slot.instances, &zero);
+    if (underside) {
+      vkCmdDraw(slot.cmd, 4, 1, 0, undersideAt);  // r45d: after the solid pieces, before the glowing quads
+    }
     if (filled[kQuadBucket] > 0) {
       vkCmdDraw(slot.cmd, 4, filled[kQuadBucket], 0, first[kQuadBucket]);
     }

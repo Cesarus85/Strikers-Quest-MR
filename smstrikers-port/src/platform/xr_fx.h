@@ -60,6 +60,9 @@ struct Scene {
   float screenWidth = 0.0f, screenHeight = 0.0f;
   // r44e: the goal banner over the scorer (a quad turned to you), a solid the pieces bounce off and
   // land on, and that hides what falls behind it.
+  // r45d: your eyes are under the Tabletop field (it floats up while the scorer is out): its underside
+  // is drawn solid, where the game's field is only seen from above.
+  bool tableUnderside = false;
   bool bannerValid = false;
   XrPosef bannerPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
   float bannerWidth = 0.0f, bannerHeight = 0.0f;

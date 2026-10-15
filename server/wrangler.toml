@@ -11,6 +11,10 @@ class_name = "Room"
 name = "QUEUES"
 class_name = "Matchmaker"
 
+[[durable_objects.bindings]]
+name = "TOURNEYS"
+class_name = "Tourneys"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
@@ -18,3 +22,10 @@ new_sqlite_classes = ["Room"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Matchmaker"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Tourneys"]
+
+# No [vars]: TEST_FAST (short tournament timers for test-tourney.mjs) is only ever given to a local
+# `wrangler dev --var TEST_FAST:1`, never to the deployed worker.
