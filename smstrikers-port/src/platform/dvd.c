@@ -721,3 +721,10 @@ const char* port_disc_maker_code(void)
     }
     return code;
 }
+
+// strikers-quest r46: the disc image the game reads, or NULL when it reads an extracted folder.
+// RetroAchievements (src/platform/xr_ra.cpp) knows a game by a hash of the image's own bytes.
+const char* port_dvd_image_path(void)
+{
+    return s_disc != NULL ? s_root : NULL;
+}

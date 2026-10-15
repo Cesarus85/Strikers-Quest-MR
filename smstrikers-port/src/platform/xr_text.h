@@ -20,4 +20,10 @@ void goal_banner(uint8_t* rgba, int w, int h, const char* name, uint32_t teamRgb
 // stadium (heightCm, + higher), with `row` (0 crowd, 1 voice, 2 height) picked; h about 0.6 w.
 void settings_panel(uint8_t* rgba, int w, int h, int level, int steps, int voice, int heightCm, int row);
 
+// r46: a RetroAchievements pop-up: `header` ("ACHIEVEMENT UNLOCKED") with the points (none when
+// points <= 0), the title, and the description (wrapped onto two lines if it must), beside a gold
+// star. Laid out for w : h = 1024 : 300.
+void achievement_toast(uint8_t* rgba, int w, int h, const char* header, const char* title, const char* description,
+                       int points);
+
 }  // namespace xrtext

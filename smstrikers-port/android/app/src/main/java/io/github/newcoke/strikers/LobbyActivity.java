@@ -151,6 +151,8 @@ public class LobbyActivity extends Activity {
         page.addView(button("Host an online match", false, v -> showHost(newCode())));
         page.addView(button("Join with a code", false, v -> showJoin()));
         page.addView(button("Voice chat: " + (voiceOn() ? "On" : "Off"), false, v -> toggleVoice()));  // r44
+        page.addView(button("Controls", false, v -> showControls()));  // r46
+        page.addView(button("RetroAchievements", false, v -> showRetroAch()));  // r46
         page.addView(button("Choose game file", false, v -> showChooser(null, null)));
         TextView game = note(gameStatus());
         game.setTextSize(14);
@@ -609,6 +611,236 @@ public class LobbyActivity extends Activity {
         page.postDelayed(() -> {
             if (token == quickToken) start(code);
         }, 3000);
+    }
+
+    // --- strikers-quest r46: Controls (Lance: "some type of button mapping for this game so users can
+    // customize their controls"). Each GameCube button gets a Quest button; xr_controls.txt in the
+    // game's folder holds the map ("A=a", "Z=rg", ...), and the game looks at it about once a second
+    // (xr_quest.cpp reload_controls), so a change applies even with the game open behind this panel.
+    // The sticks, the stick clicks (views) and the left grip (moving the table or the screen) stay.
+
+    private static final String[] ACTIONS = {"A", "B", "X", "Y", "Z", "L", "R", "START"};
+    private static final String[] ACTION_LABELS = {"Pass (GameCube A)", "Shoot (GameCube B)",
+            "Use your item (GameCube X)", "Hit (GameCube Y)", "Swap items (GameCube Z)", "GameCube L",
+            "GameCube R", "Pause (Start)"};
+    private static final String[] SOURCES = {"a", "b", "x", "y", "lt", "rt", "rg", "menu", "none"};
+    private static final String[] SOURCE_LABELS = {"A button", "B button", "X button", "Y button",
+            "Left trigger", "Right trigger", "Right grip", "Menu button", "Nothing"};
+    private static final String[] DEFAULT_CONTROLS = {"a", "b", "x", "y", "rg", "lt", "rt", "menu"};
+
+    private File controlsFile() {
+        return new File(StrikersHome.homeDir(this), "xr_controls.txt");
+    }
+
+    /** The map as the game reads it: one source name per action, defaults for anything missing. */
+    private String[] readControls() {
+        String[] map = DEFAULT_CONTROLS.clone();
+        for (String line : readText(controlsFile(), 400).split("\n")) {
+            int eq = line.indexOf('=');
+            if (eq <= 0) continue;
+            String key = line.substring(0, eq).trim(), value = line.substring(eq + 1).trim().toLowerCase(java.util.Locale.ROOT);
+            for (int i = 0; i < ACTIONS.length; i++) {
+                if (ACTIONS[i].equalsIgnoreCase(key) && java.util.Arrays.asList(SOURCES).contains(value)) map[i] = value;
+            }
+        }
+        return map;
+    }
+
+    private void writeControls(String[] map) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < ACTIONS.length; i++) sb.append(ACTIONS[i]).append('=').append(map[i]).append('\n');
+        try (java.io.OutputStream out = new java.io.FileOutputStream(controlsFile())) {
+            out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            android.util.Log.w("strikers", "could not write " + controlsFile(), e);
+        }
+    }
+
+    private static String sourceLabel(String source) {
+        for (int i = 0; i < SOURCES.length; i++) if (SOURCES[i].equals(source)) return SOURCE_LABELS[i];
+        return source;
+    }
+
+    private void showControls() {
+        leaveTourneyPage();
+        page.removeAllViews();
+        onHome = false;
+        title("Controls", 26);
+        note("Tap a game button, then the Quest button you want for it. It changes right away, even with"
+                + " the game open.");
+        final String[] map = readControls();
+        for (int i = 0; i < ACTIONS.length; i++) {
+            final int action = i;
+            final String head = ACTION_LABELS[i];
+            final boolean changed = !map[i].equals(DEFAULT_CONTROLS[i]);
+            Button b = row(head + "\n" + sourceLabel(map[i]) + (changed ? "   (changed)" : ""), true,
+                    v -> showControlPick(action));
+            SpannableString text = new SpannableString(b.getText());
+            text.setSpan(new StyleSpan(Typeface.BOLD), 0, head.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            b.setText(text);
+            page.addView(b);
+        }
+        TextView fixed = note("Always: left stick moves, right stick is the GameCube C-stick, clicking a stick"
+                + " twice switches the view, and the left grip moves the table or the big screen.");
+        fixed.setTextSize(14);
+        fixed.setTextColor(MUTED);
+        page.addView(button("Back to the default buttons", false, v -> {
+            writeControls(DEFAULT_CONTROLS.clone());
+            showControls();
+        }));
+        page.addView(button("Back", false, v -> showHome()));
+    }
+
+    /** One game button: the Quest buttons to pick from. One already taken swaps with it. */
+    private void showControlPick(final int action) {
+        page.removeAllViews();
+        onHome = false;
+        title(ACTION_LABELS[action], 24);
+        final String[] map = readControls();
+        note("Pick the Quest button for it. Now: " + sourceLabel(map[action]) + ".");
+        for (int s = 0; s < SOURCES.length; s++) {
+            final String source = SOURCES[s];
+            String owner = "";
+            for (int i = 0; i < ACTIONS.length; i++) {
+                if (i != action && map[i].equals(source) && !source.equals("none")) owner = "   (now " + ACTION_LABELS[i] + ": they swap)";
+            }
+            page.addView(row(SOURCE_LABELS[s] + (source.equals(map[action]) ? "   (current)" : owner), true, v -> {
+                final String old = map[action];
+                if (!source.equals("none")) {
+                    for (int i = 0; i < ACTIONS.length; i++) {
+                        if (i != action && map[i].equals(source)) map[i] = old;  // the two swap
+                    }
+                }
+                map[action] = source;
+                writeControls(map);
+                showControls();
+            }));
+        }
+        page.addView(button("Back", false, v -> showControls()));
+    }
+
+    // --- strikers-quest r46: RetroAchievements (Lance: "its allowed to use THEIR strikers achievement
+    // set"). Log in once; the page lists Super Mario Strikers' set and what this account has (RetroAch).
+    // Off the UI thread throughout (Android refuses network calls there).
+
+    private int raToken;  // the page's background work (a newer page, or Back, ends it)
+
+    private void showRetroAch() {
+        leaveTourneyPage();
+        page.removeAllViews();
+        onHome = false;
+        final int token = ++raToken;
+        title("RetroAchievements", 26);
+        final RetroAch.Login login = RetroAch.saved(this);
+        if (login == null) {
+            note("Log in with your RetroAchievements account (retroachievements.org) to get Super Mario"
+                    + " Strikers' achievements. Only a login token is kept on this Quest, never your password."
+                    + " Achievements count in casual mode.");
+            final EditText user = new EditText(this);
+            user.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            user.setHint("Username");
+            final EditText pass = new EditText(this);
+            pass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            pass.setHint("Password");
+            for (EditText f : new EditText[] {user, pass}) {
+                f.setTextSize(22);
+                f.setTextColor(Color.WHITE);
+                f.setHintTextColor(Color.GRAY);
+                f.setSingleLine(true);
+                f.setGravity(Gravity.CENTER);
+                page.addView(f, new LinearLayout.LayoutParams(dp(360), ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            final TextView status = note("");
+            page.addView(button("Log in", true, v -> {
+                final String u = user.getText().toString().trim(), p = pass.getText().toString();
+                if (u.isEmpty() || p.isEmpty()) {
+                    status.setText("Type your username and password.");
+                    status.setTextColor(WARN);
+                    return;
+                }
+                status.setText("Logging in...");
+                status.setTextColor(MUTED);
+                new Thread(() -> {
+                    String error = null;
+                    try {
+                        RetroAch.login(this, u, p);
+                    } catch (Exception e) {
+                        error = e.getMessage() != null ? e.getMessage() : e.toString();
+                    }
+                    final String why = error;
+                    runOnUiThread(() -> {
+                        if (token != raToken) return;
+                        if (why == null) {
+                            showRetroAch();
+                        } else {
+                            status.setText("Couldn't log in: " + why);
+                            status.setTextColor(WARN);
+                        }
+                    });
+                }, "strikers-ra-login").start();
+            }));
+            page.addView(button("Back", false, v -> {
+                ++raToken;
+                showHome();
+            }));
+            return;
+        }
+        note("Logged in as " + login.user + ".");
+        final TextView status = note("Loading Super Mario Strikers' achievements...");
+        final LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        page.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        page.addView(button("Log out", false, v -> {
+            ++raToken;
+            RetroAch.logout(this);
+            showRetroAch();
+        }));
+        page.addView(button("Back", false, v -> {
+            ++raToken;
+            showHome();
+        }));
+        new Thread(() -> {
+            java.util.List<RetroAch.Achievement> set = null;
+            String error = null;
+            try {
+                set = RetroAch.fetchSet(this, login);
+            } catch (Exception e) {
+                error = e.getMessage() != null ? e.getMessage() : e.toString();
+            }
+            final java.util.List<RetroAch.Achievement> got = set;
+            final String why = error;
+            runOnUiThread(() -> {
+                if (token != raToken || list.getParent() != page) return;
+                if (got == null) {
+                    status.setText("Couldn't load the achievements: " + why);
+                    status.setTextColor(WARN);
+                    return;
+                }
+                int have = 0, points = 0, all = 0;
+                for (RetroAch.Achievement a : got) {
+                    all += a.points;
+                    if (a.unlocked) {
+                        have++;
+                        points += a.points;
+                    }
+                }
+                status.setText(have + " of " + got.size() + " unlocked, " + points + " of " + all
+                        + " points.\nThey unlock as you play, with a pop-up in the headset. (Logged in"
+                        + " while the game was already running? Close it and start it again.)");
+                status.setTextColor(Color.rgb(190, 200, 215));
+                for (RetroAch.Achievement a : got) {
+                    final String head = (a.unlocked ? "✓ " : "") + a.title + "   (" + a.points + " points)";
+                    Button b = row(head + "\n" + a.description, a.unlocked, null);
+                    b.setEnabled(false);
+                    b.setTextColor(a.unlocked ? Color.WHITE : MUTED);
+                    SpannableString text = new SpannableString(b.getText());
+                    text.setSpan(new StyleSpan(Typeface.BOLD), 0, head.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    b.setText(text);
+                    list.addView(b);
+                }
+            });
+        }, "strikers-ra-set").start();
     }
 
     // --- strikers-quest r44: Voice chat, voice.txt in the game's folder (src/platform/xr_voice.cpp reads

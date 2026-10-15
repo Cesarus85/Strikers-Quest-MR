@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -359,6 +361,70 @@ void settings_panel(uint8_t* rgba, int w, int h, int level, int steps, int voice
   TextStyle hs{fitted(hint, 0.12f * u), rgb(0xB8C2D6), rgb(0x9AA6BE), rgb(0x05070C), 0.012f * u, rgb(0x000000, 0.0f),
                0.0f, 0.0f};
   draw_text(cv, hint, 0.5f * w, 0.5f * (1.60f * u + h - 8.0f), hs);
+  cv.write(rgba);
+}
+
+// r46: a RetroAchievements unlock. The font has capitals only, so everything is upper-cased; the
+// description wraps onto a second line, at its word gap nearest the middle, when it would not fit.
+void achievement_toast(uint8_t* rgba, int w, int h, const char* header, const char* title, const char* description,
+                       int points) {
+  Canvas cv(w, h);
+  const float u = static_cast<float>(h);
+  panel(cv, 8.0f, 8.0f, w - 8.0f, h - 8.0f, 0.14f * u, 0.025f * u, rgb(0x241300), rgb(0xFFD23F), rgb(0x22305A),
+        rgb(0x0B1020));
+  auto upper = [](const char* s) {
+    std::string r = s != nullptr ? s : "";
+    for (char& c : r) {
+      if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+      else if (static_cast<unsigned char>(c) >= 0x80) c = ' ';  // outside the font
+    }
+    return r;
+  };
+  // The star on the left, the text centred in the room to its right.
+  const float starR = 0.22f * u, starX = 0.04f * w + 1.3f * starR;
+  star(cv, starX, 0.5f * u, starR, rgb(0xFFD23F), rgb(0x3A1800));
+  const float left = starX + 1.6f * starR, right = w - 0.04f * w, room = right - left, cx = 0.5f * (left + right);
+  auto fit = [&](const std::string& text, float px) {
+    const float wide = text_width(text.c_str(), px);
+    return wide > room ? px * room / wide : px;
+  };
+
+  std::string head = upper(header);
+  if (points > 0) {
+    char p[32];
+    std::snprintf(p, sizeof(p), "   +%d POINT%s", points, points == 1 ? "" : "S");
+    head += p;
+  }
+  draw_text(cv, head.c_str(), cx, 0.2f * u,
+            TextStyle{fit(head, 0.13f * u), rgb(0xFFF7B0), rgb(0xFFC21F), rgb(0x05070C), 0.012f * u,
+                      rgb(0x000000, 0.0f), 0.0f, 0.0f});
+  const std::string t = upper(title);
+  draw_text(cv, t.c_str(), cx, 0.43f * u,
+            TextStyle{fit(t, 0.2f * u), rgb(0xFFFFFF), rgb(0xDDE4F0), rgb(0x05070C), 0.018f * u,
+                      rgb(0x000000, 0.45f), 0.008f * u, 0.01f * u});
+
+  const std::string d = upper(description);
+  const float dpx = 0.12f * u;
+  const TextStyle ds{dpx, rgb(0xC8D2E6), rgb(0xA8B4CC), rgb(0x05070C), 0.01f * u, rgb(0x000000, 0.0f), 0.0f, 0.0f};
+  if (text_width(d.c_str(), dpx) <= room) {
+    draw_text(cv, d.c_str(), cx, 0.7f * u, ds);
+  } else {
+    size_t cut = std::string::npos;
+    for (size_t i = 0; i < d.size(); ++i) {
+      if (d[i] == ' ' && (cut == std::string::npos ||
+                          std::abs(static_cast<long>(i) - static_cast<long>(d.size() / 2)) <
+                              std::abs(static_cast<long>(cut) - static_cast<long>(d.size() / 2)))) {
+        cut = i;
+      }
+    }
+    const std::string a = cut != std::string::npos ? d.substr(0, cut) : d;
+    const std::string b = cut != std::string::npos ? d.substr(cut + 1) : std::string();
+    const float px = std::min(fit(a, dpx), b.empty() ? dpx : fit(b, dpx));
+    TextStyle s2 = ds;
+    s2.px = px;
+    draw_text(cv, a.c_str(), cx, 0.66f * u, s2);
+    if (!b.empty()) draw_text(cv, b.c_str(), cx, 0.66f * u + 1.15f * px, s2);
+  }
   cv.write(rgba);
 }
 

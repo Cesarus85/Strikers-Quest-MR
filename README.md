@@ -64,6 +64,11 @@ And around the game:
   screen, or in the game's pause settings.
 - **Pause settings**: crowd volume, voice chat, and your eye height in the stadium (for playing seated,
   or if you're shorter or taller).
+- **Button mapping** (alpha 1.6): put pass, shoot, items, hit, swap items, L, R and pause on whichever
+  Quest buttons you like, with **Controls** on the app's first screen.
+- **RetroAchievements** (alpha 1.6): log in with your [RetroAchievements](https://retroachievements.org)
+  account and earn the site's official Super Mario Strikers achievements as you play, with a pop-up in
+  the headset for each one.
 - **Your disc image as it is**: `.iso`, or Dolphin's `.rvz` and `.wia` with any compression. Pick
   it with **Choose game file**, which also tells you if a file isn't the right game.
 - **Updates from inside the app**: when there's a new version, the first screen offers **Update
@@ -135,6 +140,8 @@ Now see [Controls](#controls-quest-3-controllers) to switch to the tabletop and 
 | **Left / right trigger** | The GameCube's L / R |
 | **Right stick** | The GameCube's C-stick |
 | **Menu button** (left controller, ☰) | Pause |
+
+Want them somewhere else? See [Button mapping](#button-mapping).
 
 ### Switching views
 
@@ -214,6 +221,32 @@ Alpha 1.5. Knockout tournaments for 4 or 8 players, on the same release and Vers
 - Leaving the tournament mid-match counts as a loss. If your opponent never turns up, after 5
   minutes you can claim the win.
 - A tournament nobody plays on for an hour is dropped.
+
+## Button mapping
+
+Alpha 1.6. Press **Controls** on the app's first screen. Tap an action (Pass, Shoot, Use your item,
+Hit, Swap items, GameCube L, GameCube R, Pause), then the Quest button you want for it: **A, B, X,
+Y, left or right trigger, right grip** or the **menu button** (or **Nothing**). A button that was
+already in use swaps over to the action you took it from. **Back to the default buttons** puts
+everything back. Changes apply even with the game already running. The sticks, the stick clicks and
+the left grip (which moves the table) stay where they are.
+
+## RetroAchievements
+
+Alpha 1.6. Earn [RetroAchievements](https://retroachievements.org)' official Super Mario Strikers
+set (40 achievements) as you play.
+
+1. Make a free account on [retroachievements.org](https://retroachievements.org) if you don't have one.
+2. Press **RetroAchievements** on the app's first screen and log in. Only a login token is kept on
+   your Quest, never your password. The page lists the whole set and what you've unlocked.
+3. Start the game. A pop-up shows how many you have, and each new one pops up as you earn it and
+   goes to your RetroAchievements profile.
+
+- Achievements count in **casual** mode. RetroAchievements only allows hardcore on apps it has
+  approved, so the page and your profile show a warning about that; casual unlocks still count.
+- Your game file has to be a disc image (`.iso`, `.rvz` or `.wia`) that RetroAchievements knows.
+  The pop-up tells you if it isn't.
+- Logged in while the game was already running? Close the game and start it again.
 
 ## If something goes wrong
 
@@ -373,8 +406,11 @@ the same server.
 - [bylaws/libadrenotools](https://github.com/bylaws/libadrenotools): custom GPU driver loading,
   inherited from the Android port and still built in.
 - [SDL](https://github.com/libsdl-org/SDL), [Dawn](https://dawn.googlesource.com/dawn),
-  [zstd](https://github.com/facebook/zstd) (reads `.rvz`), [Opus](https://opus-codec.org) (voice chat) and the
+  [zstd](https://github.com/facebook/zstd) (reads `.rvz`), [Opus](https://opus-codec.org) (voice chat),
+  [rcheevos](https://github.com/RetroAchievements/rcheevos) (achievements) and the
   [Khronos OpenXR loader](https://github.com/KhronosGroup/OpenXR-SDK).
+- [RetroAchievements](https://retroachievements.org) and its community: the Super Mario Strikers
+  achievement set, used as they publish it.
 - Button prompt artwork by [Kenney](https://www.kenney.nl) (CC0).
 - Quest mixed-reality port and the Quest 3 Strikers art: [LanceSweatpants](https://github.com/LanceSweatpants).
 
@@ -406,7 +442,7 @@ up:
 - **Bundled libraries**, each under its own file: Aurora (MIT, `extern/aurora/LICENSE`), MusyX (MIT,
   `extern/musyx/LICENSE`), zstd (BSD, `extern/zstd/LICENSE`), and Kenney's button prompts (CC0,
   `assets/input-prompts/LICENSE-Kenney.txt`). SDL3 (zlib), Dawn (BSD 3-Clause), libadrenotools
-  (BSD 2-Clause), the OpenXR loader (Apache 2.0), Opus (BSD 3-Clause) and Aurora's other dependencies (abseil, fmt,
+  (BSD 2-Clause), the OpenXR loader (Apache 2.0), Opus (BSD 3-Clause), rcheevos (MIT) and Aurora's other dependencies (abseil, fmt,
   FreeType, Dear ImGui, libpng, SQLite, xxHash) are downloaded at build time, each under its own
   license.
 - **The Android port's own code** (`luisxl15/Strikers-Android-Port`) has no license stated by its

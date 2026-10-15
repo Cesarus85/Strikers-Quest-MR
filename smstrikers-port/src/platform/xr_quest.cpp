@@ -34,6 +34,7 @@
 #include "xr_net.hpp" // online 1v1 (include/port/xr_net.h)
 #include "xr_text.h"  // r42: the goal banner and the crowd volume panel
 #include "xr_voice.h" // r44: voice chat, its switch on the pause panel
+#include "xr_ra.h"    // r46: RetroAchievements, its pop-ups
 #include "../../include/port/xr_net.h"
 
 #include <algorithm>
@@ -49,6 +50,7 @@
 #include <vector>
 
 #include <sys/stat.h>
+#include <strings.h>  // r46: strcasecmp
 #include <dirent.h>
 #include <cstdarg>
 #include <cstdio>
@@ -99,6 +101,7 @@ static void ensure_fx();
 void load_crowd_level();
 void update_crowd_mix();
 void settings_input(XrVector2f stick);  // r44g: the pause settings panel
+void reload_controls();                 // r46: the button map (xr_controls.txt)
 void load_view_height();
 
 namespace {
@@ -312,6 +315,14 @@ struct Passthrough {
   PFN_xrPassthroughLayerResumeFB resumeLayer = nullptr;
 };
 
+// r46, button mapping: the Quest buttons a GameCube button can come from, and the GameCube buttons.
+// The names are the ones in xr_controls.txt (LobbyActivity's Controls page writes it).
+enum ControlSource { kSrcA, kSrcB, kSrcX, kSrcY, kSrcTrigL, kSrcTrigR, kSrcGripR, kSrcMenu, kSrcCount, kSrcNone = kSrcCount };
+enum ControlAction { kActA, kActB, kActX, kActY, kActZ, kActL, kActR, kActStart, kActCount };
+constexpr const char* kSourceNames[kSrcCount] = {"a", "b", "x", "y", "lt", "rt", "rg", "menu"};
+constexpr const char* kActionNames[kActCount] = {"A", "B", "X", "Y", "Z", "L", "R", "START"};
+constexpr int kDefaultControls[kActCount] = {kSrcA, kSrcB, kSrcX, kSrcY, kSrcGripR, kSrcTrigL, kSrcTrigR, kSrcMenu};
+
 struct State {
   bool active = false;
   bool quit = false;
@@ -502,9 +513,17 @@ struct State {
   uint64_t crowdRepeatNs = 0;         // right stick held: the next step
   int settingsStickDirY = 0;          // r44g: the right stick's last up/down push while paused
   int settingsRow = 0;                // r44g: the settings row picked (0 crowd, 1 voice, 2 height)
+  // r46: the button map (ControlSource per ControlAction), and when xr_controls.txt was last looked at.
+  int controls[kActCount] = {kSrcA, kSrcB, kSrcX, kSrcY, kSrcGripR, kSrcTrigL, kSrcTrigR, kSrcMenu};
+  uint64_t controlsCheckNs = 0;
+  long long controlsStamp = -1;
   int viewHeightCm = 0;               // r44g: your eye height in the stadium, + higher (xr_view_height.txt)
   bool sliderPlaced = false;
   XrPosef sliderPose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+  Panel raToast;                      // r46: a RetroAchievements pop-up (xr_ra.h)
+  uint64_t raToastShownNs = 0, raToastUntilNs = 0;
+  bool raToastPlaced = false;
+  XrVector3f raToastPos{0.0f, 0.0f, 0.0f};
   float charScale = 1.5f;             // Tabletop: players drawn this much bigger (xr_tune "charscale")
   int msaaTable = 4;                  // eye-pass multisampling, table only / with the stadium layer
   int msaaStadium = 4;                // (1 or 4; xr_tune "msaa <table> <stadium>")
@@ -1321,18 +1340,33 @@ void sync_input() {
     sync.activeActionSets = &active;
     if (XR_SUCCEEDED(xrSyncActions(g.session, &sync))) {
       const Actions& a = g.actions;
-      if (get_bool(a.a)) status.button |= PAD_BUTTON_A;
-      if (get_bool(a.b)) status.button |= PAD_BUTTON_B;
-      if (get_bool(a.x)) status.button |= PAD_BUTTON_X;
-      if (get_bool(a.y)) status.button |= PAD_BUTTON_Y;
-      if (get_bool(a.menu)) status.button |= PAD_BUTTON_START;
-
-      const float tl = get_float(a.triggerL);
-      const float tr = get_float(a.triggerR);
+      // r46 (Lance: "some type of button mapping for this game so users can customize their
+      // controls"): each GameCube button comes from the Quest button the panel's Controls page picked
+      // for it (xr_controls.txt); the defaults are the layout r1-r45 had. The sticks, the stick clicks
+      // (views) and the left grip (moving the table or the screen) stay as they are.
+      reload_controls();
+      float src[kSrcCount] = {};
+      src[kSrcA] = get_bool(a.a) ? 1.0f : 0.0f;
+      src[kSrcB] = get_bool(a.b) ? 1.0f : 0.0f;
+      src[kSrcX] = get_bool(a.x) ? 1.0f : 0.0f;
+      src[kSrcY] = get_bool(a.y) ? 1.0f : 0.0f;
+      src[kSrcMenu] = get_bool(a.menu) ? 1.0f : 0.0f;
+      src[kSrcTrigL] = get_float(a.triggerL);
+      src[kSrcTrigR] = get_float(a.triggerR);
+      src[kSrcGripR] = get_float(a.squeezeR);
+      auto from = [&](int act) { return g.controls[act] < kSrcCount ? src[g.controls[act]] : 0.0f; };
+      if (from(kActA) > 0.5f) status.button |= PAD_BUTTON_A;
+      if (from(kActB) > 0.5f) status.button |= PAD_BUTTON_B;
+      if (from(kActX) > 0.5f) status.button |= PAD_BUTTON_X;
+      if (from(kActY) > 0.5f) status.button |= PAD_BUTTON_Y;
+      if (from(kActStart) > 0.5f) status.button |= PAD_BUTTON_START;
+      const float tl = from(kActL);
+      const float tr = from(kActR);
       status.triggerLeft = trigger_analog(tl);
       status.triggerRight = trigger_analog(tr);
       if (tl > 0.9f) status.button |= PAD_TRIGGER_L;
       if (tr > 0.9f) status.button |= PAD_TRIGGER_R;
+      if (g.controls[kActZ] != kSrcGripR && from(kActZ) > 0.5f) status.button |= PAD_TRIGGER_Z;
 
       // Tabletop: grabbing the field (Lance, 2026-10-10). The left grip grabs it from anywhere; the
       // right grip grabs it when the hand is on or right next to it, and anywhere else stays the
@@ -1370,7 +1404,10 @@ void sync_input() {
         g.screens[screen_room()].grabHands = 0;
       }
       if (!gripR) g.holdRightGrip = false;
-      if (gripR && !g.table.rightGrab && !g.holdRightGrip) status.button |= PAD_TRIGGER_Z;
+      // r46: Z from the right grip only while it is mapped there; it still grabs the table either way.
+      if (g.controls[kActZ] == kSrcGripR && gripR && !g.table.rightGrab && !g.holdRightGrip) {
+        status.button |= PAD_TRIGGER_Z;
+      }
       g.prevGripR = gripR;
       const bool holdL = g.tabletop && get_float(a.squeezeL) > 0.6f;
       const int hands = (holdL && haveL ? 1 : 0) | (g.table.rightGrab && haveR ? 2 : 0);
@@ -3680,6 +3717,46 @@ std::string crowd_path() {
   return std::string(home != nullptr && *home != '\0' ? home : "/storage/emulated/0/Strikers") + "/xr_crowd.txt";
 }
 
+// r46: the button map from xr_controls.txt ("A=a", "Z=rg", "L=none", ... one per line; anything
+// missing or unknown keeps its default), looked at about once a second so a change made on the
+// panel's Controls page while the game runs behind it applies when you come back.
+void reload_controls() {
+  const uint64_t t = now_ns();
+  if (g.controlsCheckNs != 0 && t - g.controlsCheckNs < 1000000000ull) return;
+  g.controlsCheckNs = t;
+  const char* home = std::getenv("STRIKERS_HOME");
+  const std::string path =
+      std::string(home != nullptr && *home != '\0' ? home : "/storage/emulated/0/Strikers") + "/xr_controls.txt";
+  struct stat st{};
+  const long long stamp = ::stat(path.c_str(), &st) == 0 ? static_cast<long long>(st.st_mtime) * 1000 + st.st_size : 0;
+  if (stamp == g.controlsStamp) return;
+  g.controlsStamp = stamp;
+  std::copy(kDefaultControls, kDefaultControls + kActCount, g.controls);
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    char line[64];
+    while (std::fgets(line, sizeof(line), f) != nullptr) {
+      char key[16] = {}, value[16] = {};
+      if (std::sscanf(line, " %15[A-Za-z] = %15[A-Za-z]", key, value) != 2) continue;
+      for (int act = 0; act < kActCount; ++act) {
+        if (strcasecmp(key, kActionNames[act]) != 0) continue;
+        int source = strcasecmp(value, "none") == 0 ? kSrcNone : -1;
+        for (int s = 0; s < kSrcCount && source < 0; ++s) {
+          if (strcasecmp(value, kSourceNames[s]) == 0) source = s;
+        }
+        if (source >= 0) g.controls[act] = source;
+      }
+    }
+    std::fclose(f);
+  }
+  char summary[160];
+  int n = 0;
+  for (int act = 0; act < kActCount && n < static_cast<int>(sizeof(summary)) - 16; ++act) {
+    n += std::snprintf(summary + n, sizeof(summary) - n, "%s%s=%s", act ? " " : "", kActionNames[act],
+                       g.controls[act] < kSrcCount ? kSourceNames[g.controls[act]] : "none");
+  }
+  XLOG("controls: %s", summary);
+}
+
 void load_crowd_level() {
   if (FILE* f = std::fopen(crowd_path().c_str(), "r")) {
     int level = 6;
@@ -4116,6 +4193,8 @@ extern "C" int PortXrBeginFrame(void) {
 }
 
 extern "C" void PortXrEndFrame(int ranGameFrame) {
+  // r46: RetroAchievements, after the game frame: this frame's memory against the set (xr_ra.h).
+  xrra::frame(ranGameFrame != 0);
   if (!g.active || !g.frameBegun) {
     return;
   }
@@ -4196,7 +4275,8 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
   XrCompositionLayerProjection fxLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   XrCompositionLayerQuad bannerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};  // r42
   XrCompositionLayerQuad sliderQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};  // r42
-  const XrCompositionLayerBaseHeader* layers[8];
+  XrCompositionLayerQuad raQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};      // r46
+  const XrCompositionLayerBaseHeader* layers[10];
   uint32_t layerCount = 0;
 
   // The celebration effects step every display frame, smooth whatever the game's frame rate, with
@@ -4520,6 +4600,45 @@ extern "C" void PortXrEndFrame(int ranGameFrame) {
       layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&fxLayer);
     }
     g.fxNs += now_ns() - fxStart;
+    // r46: a RetroAchievements pop-up (xr_ra.h), over everything: five seconds, a metre out and a
+    // little below your eyes, following your head lazily, with a short buzz as it appears.
+    if (nowNs >= g.raToastUntilNs) {
+      std::vector<uint8_t> pixels;
+      if (xrra::take_toast(pixels) && pixels.size() == static_cast<size_t>(xrra::kToastW) * xrra::kToastH * 4) {
+        panel_upload(g.raToast, pixels.data(), xrra::kToastW, xrra::kToastH);
+        g.raToastShownNs = nowNs;
+        g.raToastUntilNs = nowNs + 5000000000ull;
+        g.raToastPlaced = false;
+        g.rumble.amplitude = 0.5f;
+        g.rumble.seconds = 0.15f;
+        g.rumble.startPending = true;
+        g.rumble.stopPending = false;
+      }
+    }
+    if (nowNs < g.raToastUntilNs && g.raToast.hasImage && g.headValid) {
+      float fx = 0.0f, fz = -1.0f;
+      floor_forward(g.headPose, &fx, &fz);
+      const XrVector3f want{g.headPose.position.x + fx * 1.0f, g.headPose.position.y - 0.3f,
+                            g.headPose.position.z + fz * 1.0f};
+      if (!g.raToastPlaced) {
+        g.raToastPos = want;
+        g.raToastPlaced = true;
+      } else {
+        const float dt = scene.dt > 0.0f ? std::min(scene.dt, 0.1f) : 1.0f / 72.0f;
+        const float k = std::min(1.0f, dt * 3.0f);
+        g.raToastPos.x += (want.x - g.raToastPos.x) * k;
+        g.raToastPos.y += (want.y - g.raToastPos.y) * k;
+        g.raToastPos.z += (want.z - g.raToastPos.z) * k;
+      }
+      // Pops up over a fifth of a second and shrinks away over the last quarter.
+      const float t = static_cast<float>(nowNs - g.raToastShownNs) / 1e9f;
+      const float left = static_cast<float>(g.raToastUntilNs - nowNs) / 1e9f;
+      const float pop = std::min({1.0f, t / 0.2f, left / 0.25f});
+      if (pop > 0.02f) {
+        place_panel(raQuad, g.raToast, g.raToastPos, 0.62f * pop);
+        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&raQuad);
+      }
+    }
     if (g.fxReady && g.celebBuzz && xrfx::cannon_waves_fired() > g.buzzWave) {
       g.buzzWave = xrfx::cannon_waves_fired();
       if (g.buzzWave > 1) {  // the first wave rides on the goal buzz
@@ -4546,6 +4665,7 @@ extern "C" void PortXrShutdown(void) {
   aurora_xr_set_frame_callback(nullptr, nullptr);
   aurora_xr_set_submit_callback(nullptr, nullptr);
   aurora_xr_set_surface_suppressed(false);
+  xrra::shutdown();
   xrfx::shutdown();
   if (g.device != VK_NULL_HANDLE) {
     vkDeviceWaitIdle(g.device);

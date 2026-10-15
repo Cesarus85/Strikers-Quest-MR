@@ -29,6 +29,10 @@ unsigned long s_seq;
 // Next frame the heartbeat is due on.
 unsigned long s_nextBeat = 600;
 
+// strikers-quest r46: a line that plays or changes the game (press, stick, cmd) has run, so this run
+// no longer counts toward RetroAchievements (ra_memory.cpp). shot, dump, echo and the rest don't.
+int s_tampered;
+
 const unsigned long kBeatFrames = 600;
 
 void init(void)
@@ -178,6 +182,8 @@ void execute(char* line, unsigned long frame)
     s_seq++;
     fprintf(stderr, "[control] #%lu frame %lu: %s%s\n", s_seq, frame,
             v == kUnknown ? "unknown: " : "", raw);
+    if (v == kPress || v == kStick || v == kCmd)
+        s_tampered = 1;
 
     // press BTN[+BTN...] [frames]
     if (v == kPress)
@@ -260,6 +266,11 @@ void execute(char* line, unsigned long frame)
 }
 
 } // namespace
+
+extern "C" int PortControlTampered(void)
+{
+    return s_tampered;
+}
 
 extern "C" int PortDebugStateWanted(void)
 {

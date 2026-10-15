@@ -247,7 +247,8 @@ list(REMOVE_ITEM PLATFORM_SOURCES
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_fx.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_net.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_text.cpp"
-     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_voice.cpp")  # r44: Quest only, with Opus (below)
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_voice.cpp"   # r44: Quest only, with Opus (below)
+     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_ra.cpp")     # r46: Quest only, with rcheevos (below)
 
 # src/platform/operator_new.cpp is the one file in the tree that is not C++11.
 list(REMOVE_ITEM PLATFORM_SOURCES
@@ -730,6 +731,27 @@ if(STRIKERS_AURORA)
         target_sources(strikers_xr PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_voice.cpp")
         target_link_libraries(strikers_xr PRIVATE Opus::opus)
         target_link_libraries(strikers PRIVATE opus aaudio)
+
+        # strikers-quest r46: RetroAchievements (src/platform/xr_ra.cpp): rcheevos (MIT), the official
+        # client library, from its release tarball. It has no CMake build of its own: its C sources are
+        # compiled here, with GameCube disc hashing only (no ROM zips, no encrypted 3DS dumps, no
+        # RAIntegration, no libretro glue).
+        FetchContent_Declare(rcheevos
+            URL https://github.com/RetroAchievements/rcheevos/archive/refs/tags/v12.5.0.tar.gz
+            URL_HASH SHA256=e6df83de4e18f0a19206e711e1e589624dcfcf6bf529c14f6dd2bb2d1ced983f
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(rcheevos)
+        file(GLOB PORT_RCHEEVOS_SOURCES
+             "${rcheevos_SOURCE_DIR}/src/*.c" "${rcheevos_SOURCE_DIR}/src/rapi/*.c"
+             "${rcheevos_SOURCE_DIR}/src/rcheevos/*.c" "${rcheevos_SOURCE_DIR}/src/rhash/*.c")
+        list(FILTER PORT_RCHEEVOS_SOURCES EXCLUDE REGEX "rc_client_raintegration|rc_libretro|hash_encrypted|/aes\\.c|hash_zip")
+        add_library(port_rcheevos STATIC ${PORT_RCHEEVOS_SOURCES})
+        target_include_directories(port_rcheevos PUBLIC "${rcheevos_SOURCE_DIR}/include")
+        target_compile_definitions(port_rcheevos PUBLIC RC_CLIENT_SUPPORTS_HASH RC_HASH_NO_ENCRYPTED RC_HASH_NO_ZIP)
+        set_target_properties(port_rcheevos PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_sources(strikers_xr PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/xr_ra.cpp")
+        target_link_libraries(strikers_xr PRIVATE port_rcheevos)
+        target_link_libraries(strikers PRIVATE port_rcheevos)
     endif()
 endif()
 

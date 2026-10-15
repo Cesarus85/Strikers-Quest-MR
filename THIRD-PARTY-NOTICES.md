@@ -30,7 +30,7 @@ Notes:
 
 | APK path | What it is | Third-party content |
 | --- | --- | --- |
-| `lib/arm64-v8a/libmain.so` | The game, the port and its engine | Aurora (incl. magic_enum, libogc-derived code), MusyX, zstd, bzip2, LZMA SDK, ODE, SDL 3, Dawn (incl. Tint, Abseil, SPIRV-Tools, SPIR-V grammar, webgpu.h), Abseil, {fmt}, xxHash, libpng, FreeType, Dear ImGui (incl. ProggyClean font, stb), SQLite, Luckiest Guy font, Opus, LLVM runtime pieces |
+| `lib/arm64-v8a/libmain.so` | The game, the port and its engine | Aurora (incl. magic_enum, libogc-derived code), MusyX, zstd, bzip2, LZMA SDK, ODE, SDL 3, Dawn (incl. Tint, Abseil, SPIRV-Tools, SPIR-V grammar, webgpu.h), Abseil, {fmt}, xxHash, libpng, FreeType, Dear ImGui (incl. ProggyClean font, stb), SQLite, Luckiest Guy font, Opus, rcheevos, LLVM runtime pieces |
 | `lib/arm64-v8a/libc++_shared.so` | C++ standard library | LLVM libc++ / libc++abi (from Android NDK r29) |
 | `lib/arm64-v8a/libopenxr_loader.so` | OpenXR loader | Khronos OpenXR loader 1.1.63 (incl. jsoncpp, jnipp, android-jni-wrappers, LLVM libc++) |
 | `lib/arm64-v8a/libmain_hook.so`, `libfile_redirect_hook.so`, `libgsl_alloc_hook.so`, `libhook_impl.so` | GPU driver loading hooks | libadrenotools (incl. liblinkernsbypass) |
@@ -74,6 +74,7 @@ Notes:
 | Kenney Input Prompts | 1.5A | CC0 1.0 | https://www.kenney.nl |
 | Luckiest Guy font | Regular (Google Fonts) | Apache-2.0 | https://fonts.google.com/specimen/Luckiest+Guy |
 | Opus audio codec (libopus) | 1.5.2 | BSD-3-Clause (Opus variant) | https://opus-codec.org |
+| rcheevos | 12.5.0 | MIT | https://github.com/RetroAchievements/rcheevos |
 
 ---
 
@@ -311,6 +312,15 @@ Notes:
   https://datatracker.ietf.org/ipr/1524/ (Xiph.Org Foundation), https://datatracker.ietf.org/ipr/1914/
   (Microsoft Corporation) and https://datatracker.ietf.org/ipr/1526/ (Broadcom Corporation).
 
+### rcheevos
+
+- License: MIT (text: [MIT License](#mit-license)).
+- Copyright (c) 2018 RetroAchievements.org.
+- Upstream: https://github.com/RetroAchievements/rcheevos (release v12.5.0, built at build time from
+  the release tarball, https://github.com/RetroAchievements/rcheevos/archive/refs/tags/v12.5.0.tar.gz,
+  unmodified; the zip, encrypted-3DS, RAIntegration and libretro parts are left out). Runs the
+  RetroAchievements set in the game (`src/platform/xr_ra.cpp`).
+
 ### Kenney Input Prompts
 
 - License: CC0 1.0 Universal (public domain dedication); no notice required.
@@ -360,6 +370,7 @@ Applies, with these copyright lines, to:
 - FreeType PCF driver: Copyright (C) 2000 by Francesco Zappa Nardelli
 - jsoncpp: Copyright (c) 2007-2010 Baptiste Lepilleur and The JsonCpp Authors
 - jnipp: Copyright (c) 2016 Mitchell Dowd
+- rcheevos: Copyright (c) 2018 RetroAchievements.org
 
 ```
 Copyright (c) <year> <copyright holders>

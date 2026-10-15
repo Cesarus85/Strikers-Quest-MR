@@ -40,6 +40,10 @@ void port_disc_close(PortDisc* disc);
 // the time taken (STRIKERS_DISC_SELFTEST, src/platform/dvd.c). A format check, nothing else.
 void port_disc_selftest(const char* path);
 
+// strikers-quest r46: the image the game is reading (src/platform/dvd.c), or NULL when it reads an
+// extracted folder instead.
+const char* port_dvd_image_path(void);
+
 #ifdef __cplusplus
 }
 #endif

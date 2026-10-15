@@ -196,6 +196,10 @@ final class StrikersHome {
         // once). Before env.txt, which can still set it for a headset test.
         startedEdition = edition(context);
         setenv("STRIKERS_EDITION", startedEdition);
+        // strikers-quest r46: RetroAchievements (src/platform/xr_ra.cpp): the panel's saved login,
+        // in the app's private folder, and the name the game's calls carry.
+        setenv("STRIKERS_RA_LOGIN", RetroAch.loginFile(context).getAbsolutePath());
+        setenv("STRIKERS_RA_UA", RetroAch.userAgent(context));
         loadEnvFile(home);
     }
 
